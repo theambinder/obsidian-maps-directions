@@ -1,0 +1,10 @@
+{
+  "id": "maps-directions",
+  "name": "Maps Directions",
+  "version": "0.1.0",
+  "minAppVersion": "1.13.1",
+  "description": "Add ordered lines and arrows to the official Maps layout in Bases while keeping its markers and backgrounds.",
+  "author": "ambinder",
+  "authorUrl": "https://github.com/theambinder",
+  "isDesktopOnly": false
+}
