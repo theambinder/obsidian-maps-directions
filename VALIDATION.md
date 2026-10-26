@@ -1,3 +1,38 @@
+# Validation — Maps Directions 0.2.0
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 26 October 2026.
+
+- All 69 automated tests pass: adapter, ordering, road collection, road graph,
+  bundled worker, worker lifecycle and overlay ownership/cancellation.
+- Strict TypeScript compilation, production bundling and installation ZIP pass.
+- Native UI retains original Display, Markers and Background groups and appends
+  Directions, Routing and Connection style. All added UI is English.
+- The Routing dropdown switches between Straight line and Follow roads (local).
+- The separate local demo creates three public example stops around Tokyo Station.
+  Existing notes and the original Japan demo are not overwritten.
+- Both consecutive local-demo connections followed loaded roads in actual Maps,
+  with bends and arrows. The diagnostic command reported 2/2 road paths and no
+  straight fallback, using 32,791 road nodes in the loaded detailed map.
+- Switching to Straight line restored two direct connections. Switching back
+  restored road paths. Original colored markers and the OpenFreeMap background
+  remained in place throughout.
+- Before road data is ready, or when no path is available, the overlay shows dashed
+  straight fallback rather than a solid claimed road route. Unsupported/raster
+  sources and overview zoom are covered by automated tests.
+- A dense-fragment regression covers the spatial-index issue found during actual
+  Tokyo verification. No bridge-crossing rules were relaxed to fix it.
+- Work runs in a locally bundled Blob worker. Directions adds no routing API,
+  network request, API key, offline-area download or persistent road database.
+- Worker cancellation, replaced-worker errors, stale results, disable, unload,
+  style reload and repeated idle events are covered by meaningful lifecycle tests.
+- Source and release files contain no personal vault notes or machine-specific paths.
+
+The paths are approximate and walking-oriented, limited to detailed loaded vector
+roads. Complete OSM topology, driving restrictions and global optimality are not
+provided. Mobile visual testing and future upstream compatibility remain pending.
+
+---
+
 # Validation — Maps Directions 0.1.0
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 25 October 2026.

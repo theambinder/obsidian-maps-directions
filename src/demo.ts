@@ -28,3 +28,29 @@ export async function openDirectionsDemo(app: App): Promise<void> {
   if (!(file instanceof TFile)) throw new Error('The demo base path is occupied by a folder.');
   await app.workspace.getLeaf('tab').openFile(file);
 }
+
+/** Public example locations, separate from the user's notes and the original demo. */
+export async function openLocalRoadsDemo(app: App): Promise<void> {
+  const folder = 'Bases/Maps Directions Local Demo';
+  let path = '';
+  for (const part of folder.split('/')) {
+    path = path ? `${path}/${part}` : part;
+    if (!app.vault.getAbstractFileByPath(path)) await app.vault.createFolder(path);
+  }
+  const stops = [
+    ['01 Nihonbashi', 35.68416, 139.77390, 'landmark', '#2583e8'],
+    ['02 Kyobashi', 35.67690, 139.76980, 'building-2', '#ef8733'],
+    ['03 Marunouchi', 35.68100, 139.76470, 'train-front', '#159b80'],
+  ] as const;
+  for (const [index, [name, latitude, longitude, icon, color]] of stops.entries()) {
+    const notePath = `${folder}/${name}.md`;
+    if (!app.vault.getAbstractFileByPath(notePath)) await app.vault.create(notePath,
+      `---\ncoordinates: [${latitude}, ${longitude}]\nSequence: ${index + 1}\nicon: ${icon}\ncolor: "${color}"\n---\n\n# ${name.slice(3)}\n\nPublic example stop for local road connections. These approximate paths use roads already loaded by official Maps.\n`);
+  }
+  const basePath = `${folder}/Local Roads Demo.base`;
+  if (!app.vault.getAbstractFileByPath(basePath)) await app.vault.create(basePath,
+    `filters:\n  and:\n    - 'file.inFolder("${folder}")'\n    - 'file.ext == "md"'\nviews:\n  - type: map\n    name: Local roads\n    coordinates: note.coordinates\n    markerIcon: note.icon\n    markerColor: note.color\n    center: "[35.6805, 139.7700]"\n    defaultZoom: 15\n    directionsEnabled: true\n    directionsSequence: note.Sequence\n    directionsRouteMode: local\n    directionsArrows: true\n  - type: table\n    name: Stops\n    order:\n      - file.name\n      - note.Sequence\n      - note.coordinates\n      - note.icon\n      - note.color\n    sort:\n      - property: note.Sequence\n        direction: ASC\n`);
+  const file = app.vault.getAbstractFileByPath(basePath);
+  if (!(file instanceof TFile)) throw new Error('The local roads demo path is occupied by a folder.');
+  await app.workspace.getLeaf('tab').openFile(file);
+}

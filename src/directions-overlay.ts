@@ -1,5 +1,8 @@
-import type { MapLike, MapsViewLike, OverlayLike } from './contracts';
-import { buildDirections } from './geometry';
+import type { FeatureCollection, MapLike, MapsViewLike, OverlayLike } from './contracts';
+import { buildDirections, normalizeLongitude } from './geometry';
+import { collectLocalRoads, type RoadSnapshot } from './local-roads';
+import { LocalRoutingClient, type RoutingClient } from './local-routing-client';
+import type { RoutingResult } from './routing-protocol';
 import { readOptions } from './settings';
 
 export const RESOURCE_PREFIX = 'obsidian-maps-directions-';
@@ -43,6 +46,7 @@ export class DirectionsOverlay implements OverlayLike {
   private readonly sourceId = `${this.id}-source`;
   private readonly lineId = `${this.id}-lines`;
   private readonly arrowId = `${this.id}-arrows`;
+  private readonly dashedId = `${this.id}-dashed`;
   private readonly imageId = `${this.id}-chevron`;
   private map: MapLike | null = null;
   private dataSignature: string | null = null;
@@ -51,9 +55,29 @@ export class DirectionsOverlay implements OverlayLike {
   private updating = false;
   private destroyed = false;
   private suspended = false;
+  private roadsDirty = true;
+  private roads: RoadSnapshot | null = null;
+  private routingKey = '';
+  private routedData: FeatureCollection | null = null;
+  private routingGeneration = 0;
+  private routingTimer: ReturnType<typeof setTimeout> | null = null;
+  private routingStatus = 'Straight-line connections.';
   private readonly onMapEvent = (): void => this.update();
+  private readonly onRoadsChanged = (...args: unknown[]): void => {
+    const event = args[0] as { sourceId?: string } | undefined;
+    if (event?.sourceId === this.sourceId) return;
+    if (event?.sourceId && this.roads && !this.roads.sources.includes(event.sourceId)) return;
+    this.roadsDirty = true;
+  };
+  private readonly onStyleLoaded = (): void => { this.clearRouting(); this.update(); };
 
-  constructor(private readonly view: MapsViewLike, private readonly onError: (error: unknown) => void) {}
+  constructor(
+    private readonly view: MapsViewLike,
+    private readonly onError: (error: unknown) => void,
+    private readonly routingClient: RoutingClient = new LocalRoutingClient(),
+  ) {}
+
+  getRoutingStatus(): string { return this.routingStatus; }
 
   update(): void {
     if (this.destroyed || this.suspended || this.updating) return;
@@ -63,23 +87,28 @@ export class DirectionsOverlay implements OverlayLike {
       const map = this.view.map;
       if (!options.enabled || !options.sequenceProperty || !map) {
         this.releaseMap();
+        this.routingStatus = 'Directions are disabled or the map is not ready.';
         return;
       }
-      const data = buildDirections(this.view.markerManager.markers, options.sequenceProperty, options.groupProperty);
-      if (data.features.length === 0) {
+      const directData = buildDirections(this.view.markerManager.markers, options.sequenceProperty, options.groupProperty);
+      if (directData.features.length === 0) {
         this.releaseMap();
+        this.routingStatus = 'No connections: add at least two markers with numeric Sequence values.';
         return;
       }
       if (this.map !== map) {
         this.releaseMap();
         this.map = map;
-        map.on('style.load', this.onMapEvent);
+        map.on('style.load', this.onStyleLoaded);
         map.on('idle', this.onMapEvent);
+        map.on('moveend', this.onRoadsChanged);
+        map.on('sourcedata', this.onRoadsChanged);
       }
       if (!map.isStyleLoaded()) return;
 
+      const data = this.connectionData(map, directData, options.routeMode);
       const dataSignature = JSON.stringify(data);
-      const styleSignature = JSON.stringify([options.arrows, options.color, options.width, options.opacity, options.arrowSize]);
+      const styleSignature = JSON.stringify([options.arrows, options.color, options.width, options.opacity, options.arrowSize, options.routeMode]);
       let source = map.getSource(this.sourceId);
       if (!source) {
         map.addSource(this.sourceId, { type: 'geojson', data });
@@ -92,6 +121,7 @@ export class DirectionsOverlay implements OverlayLike {
       if (styleSignature !== this.styleSignature) {
         this.removeLayer(map, this.arrowId);
         this.removeLayer(map, this.lineId);
+        this.removeLayer(map, this.dashedId);
       }
       if ((!options.arrows || this.imageColor !== options.color) && map.hasImage(this.imageId)) {
         this.removeLayer(map, this.arrowId);
@@ -104,8 +134,17 @@ export class DirectionsOverlay implements OverlayLike {
           id: this.lineId,
           type: 'line',
           source: this.sourceId,
+          filter: ['all', ['!=', ['get', 'connectionKind'], 'fallback'], ['!=', ['get', 'connectionKind'], 'connector']],
           layout: { 'line-cap': 'round', 'line-join': 'round' },
           paint: { 'line-color': options.color, 'line-width': options.width, 'line-opacity': options.opacity },
+        }, beforeId);
+      }
+      if (options.routeMode === 'local' && !map.getLayer(this.dashedId)) {
+        map.addLayer({
+          id: this.dashedId, type: 'line', source: this.sourceId,
+          filter: ['in', ['get', 'connectionKind'], ['literal', ['fallback', 'connector']]],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': options.color, 'line-width': options.width, 'line-opacity': options.opacity * 0.7, 'line-dasharray': [2, 2] },
         }, beforeId);
       }
       if (options.arrows) {
@@ -118,6 +157,7 @@ export class DirectionsOverlay implements OverlayLike {
             id: this.arrowId,
             type: 'symbol',
             source: this.sourceId,
+            filter: ['!=', ['get', 'connectionKind'], 'connector'],
             layout: {
               'symbol-placement': 'line-center',
               'icon-image': this.imageId,
@@ -158,18 +198,84 @@ export class DirectionsOverlay implements OverlayLike {
     try { this.onError(error); } catch { /* Reporting must never break official Maps. */ }
   }
 
+  private connectionData(map: MapLike, direct: FeatureCollection, mode: 'straight' | 'local'): FeatureCollection {
+    if (mode === 'straight') {
+      this.clearRouting();
+      this.routingStatus = 'Straight-line connections. Select Follow roads (local) in Routing to try loaded roads.';
+      return direct;
+    }
+    if (this.roadsDirty || !this.roads) {
+      try { this.roads = collectLocalRoads(map); }
+      catch { this.roads = { key: 'unsupported', state: 'unsupported', sources: [], features: [] }; }
+      this.roadsDirty = false;
+    }
+    const roads = this.roads;
+    const key = JSON.stringify([roads.key, direct]);
+    if (this.routingKey === key && this.routedData) return this.routedData;
+    this.stopRoutingJob();
+    this.routingKey = key;
+    this.routedData = { type: 'FeatureCollection', features: direct.features.map(feature => ({ ...feature, properties: { ...feature.properties, connectionKind: 'fallback' } })) };
+    const reasons = {
+      zoom: 'Zoom in to level 14 or closer to load detailed roads.',
+      unsupported: 'This background does not expose a supported vector road layer.',
+      empty: 'No road lines are loaded in this area.',
+      limited: 'This area has too much road data. Zoom in to a smaller area.',
+      ready: 'Finding paths on loaded roads…',
+    };
+    this.routingStatus = `Local roads: ${reasons[roads.state]} Straight connections are shown dashed.`;
+    if (roads.state !== 'ready') return this.routedData;
+    const generation = this.routingGeneration;
+    this.routingTimer = setTimeout(() => {
+      this.routingTimer = null;
+      const legs = direct.features.slice(0, 200).map(feature => {
+        const [from, to] = feature.geometry.coordinates;
+        return { from: [normalizeLongitude(from[0]), from[1]] as [number, number], to: [normalizeLongitude(to[0]), to[1]] as [number, number] };
+      });
+      void this.routingClient.route(roads, legs).then(result => {
+        if (this.destroyed || generation !== this.routingGeneration || this.map !== map) return;
+        this.routedData = applyRoadRoutes(direct, result);
+        const routed = this.routedData.features.filter(feature => feature.properties.connectionKind === 'road').length;
+        this.routingStatus = `Local roads: ${routed}/${direct.features.length} connections follow roads; ${direct.features.length - routed} use dashed straight fallback. ${result.stats.nodes} road nodes. Approximate paths in the loaded area only.${result.stats.truncated ? ' Road data limit reached.' : ''}`;
+        this.update();
+      }, () => {
+        if (this.destroyed || generation !== this.routingGeneration || this.map !== map) return;
+        this.routingStatus = 'Local roads: search could not finish. Straight connections are shown dashed. Try a smaller area.';
+      });
+    }, 150);
+    return this.routedData;
+  }
+
+  private stopRoutingJob(): void {
+    this.routingGeneration++;
+    if (this.routingTimer) clearTimeout(this.routingTimer);
+    this.routingTimer = null;
+    this.routingClient.cancel();
+  }
+
+  private clearRouting(): void {
+    this.stopRoutingJob();
+    this.routingKey = '';
+    this.routedData = null;
+    this.roads = null;
+    this.roadsDirty = true;
+  }
+
   private releaseMap(): void {
     const map = this.map;
     this.map = null;
     this.dataSignature = null;
     this.styleSignature = null;
     this.imageColor = null;
+    this.clearRouting();
     if (!map) return;
     const cleanup = [
-      () => map.off('style.load', this.onMapEvent),
+      () => map.off('style.load', this.onStyleLoaded),
       () => map.off('idle', this.onMapEvent),
+      () => map.off('moveend', this.onRoadsChanged),
+      () => map.off('sourcedata', this.onRoadsChanged),
       () => this.removeLayer(map, this.arrowId),
       () => this.removeLayer(map, this.lineId),
+      () => this.removeLayer(map, this.dashedId),
       () => { if (map.getSource(this.sourceId)) map.removeSource(this.sourceId); },
       () => { if (map.hasImage(this.imageId)) map.removeImage(this.imageId); },
     ];
@@ -177,4 +283,30 @@ export class DirectionsOverlay implements OverlayLike {
       try { operation(); } catch (error) { this.report(error); }
     }
   }
+}
+
+/** Keep marker positions exact. Small access segments are distinguished from the road path. */
+export function applyRoadRoutes(direct: FeatureCollection, result: RoutingResult): FeatureCollection {
+  const features: FeatureCollection['features'] = [];
+  direct.features.forEach((feature, index) => {
+    const route = result.routes[index];
+    if (!route || route.coordinates.length < 2 || route.coordinates.some(point => !Number.isFinite(point[0]) || !Number.isFinite(point[1]))) {
+      features.push({ ...feature, properties: { ...feature.properties, connectionKind: 'fallback' } });
+      return;
+    }
+    const [from, to] = feature.geometry.coordinates;
+    let previous = from[0];
+    const coordinates = route.coordinates.map(([lon, lat]): [number, number] => {
+      previous += normalizeLongitude(lon - previous);
+      return [previous, lat];
+    });
+    features.push({ ...feature, properties: { ...feature.properties, connectionKind: 'road', distance: route.distance }, geometry: { type: 'LineString', coordinates } });
+    for (const [a, b] of [[from, coordinates[0]], [coordinates[coordinates.length - 1], to]]) {
+      const dx = normalizeLongitude(a[0] - b[0]) * Math.cos(a[1] * Math.PI / 180);
+      const dy = a[1] - b[1];
+      if (Math.hypot(dx, dy) * 111195 < 1) continue;
+      features.push({ ...feature, properties: { ...feature.properties, connectionKind: 'connector' }, geometry: { type: 'LineString', coordinates: [a, b] } });
+    }
+  });
+  return { type: 'FeatureCollection', features };
 }

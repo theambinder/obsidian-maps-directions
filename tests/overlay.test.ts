@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createArrowImage, DirectionsOverlay, RESOURCE_PREFIX } from '../src/directions-overlay';
+import { applyRoadRoutes, createArrowImage, DirectionsOverlay, RESOURCE_PREFIX } from '../src/directions-overlay';
+import type { RoutingClient } from '../src/local-routing-client';
+import type { RoutingResult } from '../src/routing-protocol';
 import type { FeatureCollection, GeoJSONSourceLike, MapLike, MapsViewLike } from '../src/contracts';
 import { KEYS } from '../src/settings';
 
@@ -55,7 +57,7 @@ class FakeMap implements MapLike {
   }
 }
 
-function setup(enabled = true) {
+function setup(enabled = true, client?: RoutingClient) {
   const map = new FakeMap();
   const settings: Record<string, unknown> = { [KEYS.enabled]: enabled, [KEYS.sequence]: 'sequence' };
   const view: MapsViewLike = {
@@ -71,7 +73,7 @@ function setup(enabled = true) {
     register() {},
   };
   const errors: unknown[] = [];
-  const overlay = new DirectionsOverlay(view, error => errors.push(error));
+  const overlay = new DirectionsOverlay(view, error => errors.push(error), client);
   return { map, settings, view, errors, overlay };
 }
 
@@ -221,4 +223,81 @@ test('the arrow bitmap is colored, transparent, and points to the right', () => 
   assert.equal(alpha(17, 24), 0);
   assert.ok(alpha(20, 6) > 0);
   assert.ok(alpha(20, 41) > 0);
+});
+
+test('local mode without detailed vector roads draws a dashed fallback and never starts a worker', () => {
+  let calls = 0;
+  const { overlay, map, settings } = setup(true, { route: async () => { calls++; throw Error(); }, cancel() {} });
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  assert.equal(calls, 0);
+  assert.match(overlay.getRoutingStatus(), /supported vector/);
+  assert.ok([...map.layers.values()].some(layer => (layer.paint as Record<string, unknown> | undefined)?.['line-dasharray']));
+  const data = [...map.sources.values()].find(source => source.data)?.data;
+  assert.equal(data?.features[0].properties.connectionKind, 'fallback');
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+test('road paths keep their bends and distinguish pin access segments from missing routes', () => {
+  const direct: FeatureCollection = { type: 'FeatureCollection', features: [
+    { type: 'Feature', properties: { from: 'a', to: 'b' }, geometry: { type: 'LineString', coordinates: [[139, 35], [139.002, 35.002]] } },
+    { type: 'Feature', properties: { from: 'b', to: 'c' }, geometry: { type: 'LineString', coordinates: [[139.002, 35.002], [140, 36]] } },
+  ] };
+  const result = applyRoadRoutes(direct, { id: 1, routes: [{ coordinates: [[139.0001, 35], [139.001, 35], [139.001, 35.002], [139.002, 35.002]], distance: 400 }, null], stats: { nodes: 4, edges: 3, truncated: false } });
+  assert.deepEqual(result.features.map(feature => feature.properties.connectionKind), ['road', 'connector', 'fallback']);
+  assert.equal(result.features[0].geometry.coordinates.length, 4);
+  assert.deepEqual(result.features[1].geometry.coordinates[0], direct.features[0].geometry.coordinates[0]);
+  assert.equal(result.features[2].properties.to, 'c');
+});
+
+test('local search deduplicates idle events, ignores stale results after disabling, and preserves Maps', async () => {
+  let resolveJob!: (result: RoutingResult) => void;
+  let calls = 0;
+  const { overlay, map, settings } = setup(true, { route: () => { calls++; return new Promise(resolve => { resolveJob = resolve; }); }, cancel() {} });
+  Object.assign(map, {
+    getZoom: () => 15,
+    getStyle: () => ({ sources: { osm: { type: 'vector' } }, layers: [{ source: 'osm', 'source-layer': 'transportation' }] }),
+    querySourceFeatures: () => [{ geometry: { type: 'LineString', coordinates: [[1, 1], [2, 2]] }, properties: { class: 'minor' } }],
+  });
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  for (let i = 0; i < 10; i++) map.emit('idle');
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(calls, 1);
+  settings[KEYS.enabled] = false;
+  overlay.update();
+  const afterDisable = map.mutations.length;
+  resolveJob({ id: 1, routes: [{ coordinates: [[1, 1], [1.5, 1], [2, 2]], distance: 100 }], stats: { nodes: 3, edges: 2, truncated: false } });
+  await Promise.resolve();
+  assert.equal(map.mutations.length, afterDisable);
+  assert.equal(map.sources.size, 1);
+  assert.ok([...map.listeners.values()].every(handlers => handlers.size === 0));
+  assertOriginalResources(map);
+});
+
+test('local road results are drawn once and style changes do not repeat the search', async () => {
+  let calls = 0;
+  const { overlay, map, settings } = setup(true, { route: async () => {
+    calls++; return { id: calls, routes: [{ coordinates: [[1, 1], [1.5, 1], [2, 2]], distance: 100 }], stats: { nodes: 3, edges: 2, truncated: false } };
+  }, cancel() {} });
+  Object.assign(map, {
+    getZoom: () => 15,
+    getStyle: () => ({ sources: { osm: { type: 'vector' } }, layers: [{ source: 'osm', 'source-layer': 'transportation' }] }),
+    querySourceFeatures: () => [{ geometry: { type: 'LineString', coordinates: [[1, 1], [2, 2]] }, properties: { class: 'minor' } }],
+  });
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await new Promise(resolve => setTimeout(resolve, 180));
+  const data = [...map.sources.values()].find(source => source.data)?.data;
+  assert.equal(data?.features[0].properties.connectionKind, 'road');
+  assert.match(overlay.getRoutingStatus(), /1\/1 connections follow roads/);
+  settings[KEYS.color] = '#2583e8';
+  overlay.update();
+  const mutations = map.mutations.length;
+  for (let i = 0; i < 10; i++) map.emit('idle');
+  assert.equal(map.mutations.length, mutations);
+  assert.equal(calls, 1);
+  assertOriginalResources(map);
+  overlay.destroy();
 });

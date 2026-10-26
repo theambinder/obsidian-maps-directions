@@ -1,7 +1,7 @@
 import { Notice, Plugin } from 'obsidian';
 import { MapsAdapter, type AdapterStatus } from './adapter';
 import { DirectionsOverlay } from './directions-overlay';
-import { openDirectionsDemo } from './demo';
+import { openDirectionsDemo, openLocalRoadsDemo } from './demo';
 
 export default class MapsDirectionsPlugin extends Plugin {
   private adapter!: MapsAdapter;
@@ -39,6 +39,25 @@ export default class MapsDirectionsPlugin extends Plugin {
     this.addCommand({
       id: 'check-integration', name: 'Check Maps integration',
       callback: () => { this.adapter.reconcile(); new Notice(`Maps Directions: ${this.status.message}`, 8000); },
+    });
+    this.addCommand({
+      id: 'open-local-roads-demo', name: 'Open local roads demo',
+      callback: () => {
+        this.adapter.reconcile();
+        if (this.status.state !== 'ready') { new Notice(`Maps Directions: ${this.status.message}`, 8000); return; }
+        void openLocalRoadsDemo(this.app).catch((error: unknown) => {
+          console.error('Maps Directions: could not open local roads demo', error);
+          new Notice('Maps Directions could not open the local roads demo. See the developer console for details.');
+        });
+      },
+    });
+    this.addCommand({
+      id: 'check-local-routing', name: 'Check local routing',
+      callback: () => {
+        this.adapter.reconcile();
+        const statuses = this.adapter.getRoutingStatuses();
+        new Notice(`Maps Directions: ${statuses.length ? statuses.join('\n\n') : 'Open a Maps view to check local routing.'}`, 15000);
+      },
     });
   }
 

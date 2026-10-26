@@ -83,7 +83,7 @@ test('wraps the existing registration, preserves this/arguments/view, and append
   const result = h.registration.options.apply(receiver, args) as Array<{ displayName: string }>;
   assert.deepEqual(calls, [{ receiver, args }, { receiver, args }]);
   assert.equal(result[0], originalGroup);
-  assert.deepEqual(result.slice(1).map(group => group.displayName), ['Directions', 'Connection style']);
+  assert.deepEqual(result.slice(1).map(group => group.displayName), ['Directions', 'Routing', 'Connection style']);
   assert.deepEqual(originalOptions, [originalGroup]);
   assert.equal(h.status()?.state, 'ready');
 });

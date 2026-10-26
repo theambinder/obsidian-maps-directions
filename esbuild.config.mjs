@@ -2,6 +2,10 @@ import { build } from 'esbuild';
 import { mkdir, copyFile } from 'node:fs/promises';
 
 await mkdir('dist', { recursive: true });
+const worker = await build({
+  entryPoints: ['src/local-routing-worker.ts'], bundle: true, write: false,
+  format: 'iife', platform: 'browser', target: 'es2020', minify: true,
+});
 await build({
   entryPoints: ['src/main.ts'],
   bundle: true,
@@ -10,6 +14,7 @@ await build({
   platform: 'browser',
   target: 'es2020',
   minify: true,
+  define: { __LOCAL_ROUTING_WORKER__: JSON.stringify(worker.outputFiles[0].text) },
   legalComments: 'eof',
   outfile: 'dist/main.js',
 });

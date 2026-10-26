@@ -68,6 +68,11 @@ export class MapsAdapter {
     if (typeof timer.unref === 'function') timer.unref();
   }
 
+  getRoutingStatuses(): string[] {
+    return [...this.views].filter(binding => binding.active)
+      .map(binding => binding.overlay.getRoutingStatus?.()).filter((status): status is string => !!status);
+  }
+
   reconcile(): void {
     if (!this.running) return;
     try {

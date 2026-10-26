@@ -34,6 +34,9 @@ export interface GeoJSONSourceLike {
 
 /** Public MapLibre operations; the MapLibre runtime is supplied by official Maps. */
 export interface MapLike {
+  getStyle?(): { sources?: Record<string, { type?: string }>; layers?: Array<{ source?: string; 'source-layer'?: string }> };
+  getZoom?(): number;
+  querySourceFeatures?(sourceId: string, options: { sourceLayer: string }): import('./road-graph').RoadFeature[];
   isStyleLoaded(): boolean;
   getSource(id: string): GeoJSONSourceLike | undefined;
   addSource(id: string, source: { type: 'geojson'; data: FeatureCollection }): unknown;
@@ -64,4 +67,5 @@ export interface MapsViewLike {
 export interface OverlayLike {
   update(): void;
   destroy(): void;
+  getRoutingStatus?(): string;
 }
