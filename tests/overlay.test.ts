@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyRoadRoutes, createArrowImage, DirectionsOverlay, RESOURCE_PREFIX } from '../src/directions-overlay';
 import type { RoutingClient } from '../src/local-routing-client';
-import type { RoutingResult } from '../src/routing-protocol';
-import type { FeatureCollection, GeoJSONSourceLike, MapLike, MapsViewLike } from '../src/contracts';
+import type { RoadRoute, RoutingResult } from '../src/routing-protocol';
+import type { RoadFeature } from '../src/road-graph';
+import type { FeatureCollection, GeoJSONSourceLike, MapLike, MapsMarker, MapsViewLike } from '../src/contracts';
 import { KEYS } from '../src/settings';
 
 class FakeMap implements MapLike {
@@ -47,7 +48,7 @@ class FakeMap implements MapLike {
     this.listeners.get(event)!.add(handler);
   }
   off(event: string, handler: (...args: unknown[]) => void): void { this.listeners.get(event)?.delete(handler); }
-  emit(event: string): void { for (const handler of [...this.listeners.get(event) ?? []]) handler(); }
+  emit(event: string, ...args: unknown[]): void { for (const handler of [...this.listeners.get(event) ?? []]) handler(...args); }
   reloadStyle(): void {
     this.sources = new Map([['maps-markers', { setData() {} }]]);
     this.layers = new Map([['marker-pins', { id: 'marker-pins' }]]);
@@ -298,6 +299,222 @@ test('local road results are drawn once and style changes do not repeat the sear
   for (let i = 0; i < 10; i++) map.emit('idle');
   assert.equal(map.mutations.length, mutations);
   assert.equal(calls, 1);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+class DeferredRoutingClient implements RoutingClient {
+  calls: Array<{
+    legs: Parameters<RoutingClient['route']>[1];
+    resolve: (result: RoutingResult) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  cancellations = 0;
+  route(_snapshot: Parameters<RoutingClient['route']>[0], legs: Parameters<RoutingClient['route']>[1]): Promise<RoutingResult> {
+    return new Promise((resolve, reject) => { this.calls.push({ legs, resolve, reject }); });
+  }
+  cancel(): void { this.cancellations++; }
+  finish(index: number, routes: Array<RoadRoute | null>): void {
+    this.calls[index].resolve({ id: index + 1, routes, stats: { nodes: 10, edges: 9, truncated: false } });
+  }
+}
+
+function attachRoads(map: FakeMap) {
+  const state = {
+    zoom: 15, queries: 0,
+    roads: [{ geometry: { type: 'LineString', coordinates: [[1, 1], [2, 2], [3, 3], [4, 4]] }, properties: { class: 'minor' } }] as RoadFeature[],
+  };
+  Object.assign(map, {
+    getZoom: () => state.zoom,
+    getStyle: () => ({ sources: { osm: { type: 'vector' } }, layers: [{ source: 'osm', 'source-layer': 'transportation' }] }),
+    querySourceFeatures: () => { state.queries++; return state.roads; },
+  });
+  return state;
+}
+
+function directionData(map: FakeMap): FeatureCollection {
+  const source = [...map.sources.values()].find(source => source.data);
+  assert.ok(source?.data);
+  return source.data;
+}
+
+function mainConnections(map: FakeMap) {
+  return directionData(map).features.filter(feature => feature.properties.connectionKind !== 'connector');
+}
+
+function extraMarker(name: string, coordinate: number, sequence: number): MapsMarker {
+  return { coordinates: [coordinate, coordinate], entry: { file: { path: name }, getValue: () => ({ toString: () => String(sequence) }) } };
+}
+
+const roadAB: RoadRoute = { coordinates: [[1, 1], [1.5, 1], [2, 2]], distance: 100 };
+const roadBC: RoadRoute = { coordinates: [[2, 2], [2.5, 2], [3, 3]], distance: 110 };
+const waitForRouting = () => new Promise(resolve => setTimeout(resolve, 180));
+const flushRouting = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+test('found road geometry survives zooming out and panning into areas without detailed roads', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings } = setup(true, client);
+  const roads = attachRoads(map);
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await waitForRouting();
+  client.finish(0, [roadAB]);
+  await flushRouting();
+  const found = structuredClone(directionData(map));
+  const queries = roads.queries;
+  for (const zoom of [13, 6]) {
+    roads.zoom = zoom;
+    map.emit('moveend');
+    map.emit('idle');
+    assert.deepEqual(directionData(map), found);
+  }
+  roads.zoom = 15;
+  roads.roads = [];
+  map.emit('moveend');
+  map.emit('sourcedata', { sourceId: 'osm' });
+  map.emit('idle');
+  assert.deepEqual(directionData(map), found);
+  assert.equal(client.calls.length, 1);
+  assert.equal(roads.queries, queries);
+  assert.match(overlay.getRoutingStatus(), /every zoom level/);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+test('style reload and map recreation restore retained paths without needing loaded road sources', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, view, errors } = setup(true, client);
+  const roads = attachRoads(map);
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await waitForRouting();
+  client.finish(0, [roadAB]);
+  await flushRouting();
+  const found = structuredClone(directionData(map));
+  roads.zoom = 6;
+  map.reloadStyle();
+  assert.deepEqual(directionData(map), found);
+  const replacement = new FakeMap(); // No querySourceFeatures or road source is available.
+  view.map = replacement;
+  overlay.update();
+  assert.deepEqual(directionData(replacement), found);
+  assert.equal(client.calls.length, 1);
+  assert.equal(map.sources.size, 1);
+  assert.ok([...map.listeners.values()].every(handlers => handlers.size === 0));
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  assertOriginalResources(replacement);
+  overlay.destroy();
+});
+
+test('searching only missing legs preserves found paths and maps subset results to the correct connections', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, view } = setup(true, client);
+  attachRoads(map);
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await waitForRouting();
+  client.finish(0, [roadAB]);
+  await flushRouting();
+  view.markerManager.markers.push(extraMarker('third.md', 3, 2));
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['road', 'fallback']);
+  await waitForRouting();
+  assert.deepEqual(client.calls[1].legs, [{ from: [2, 2], to: [3, 3] }]);
+  client.finish(1, [roadBC]);
+  await flushRouting();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.to), ['end.md', 'third.md']);
+  assert.deepEqual(mainConnections(map).map(feature => feature.geometry.coordinates), [roadAB.coordinates, roadBC.coordinates]);
+
+  view.markerManager.markers.push(extraMarker('fourth.md', 4, 3));
+  overlay.update();
+  await waitForRouting();
+  assert.deepEqual(client.calls[2].legs, [{ from: [3, 3], to: [4, 4] }]);
+  client.calls[2].reject(new Error('Search failed'));
+  await flushRouting();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['road', 'road', 'fallback']);
+  view.markerManager.markers[3].coordinates = [4.5, 4.5];
+  overlay.update();
+  await waitForRouting();
+  client.finish(3, [null]);
+  await flushRouting();
+  assert.deepEqual(mainConnections(map).slice(0, 2).map(feature => feature.geometry.coordinates), [roadAB.coordinates, roadBC.coordinates]);
+  assert.equal(mainConnections(map)[2].properties.connectionKind, 'fallback');
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+test('moving an endpoint invalidates only its leg and reversing Sequence never reuses a forward path', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, view } = setup(true, client);
+  const roads = attachRoads(map);
+  view.markerManager.markers.push(extraMarker('third.md', 3, 2));
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await waitForRouting();
+  client.finish(0, [roadAB, roadBC]);
+  await flushRouting();
+  roads.zoom = 6;
+  map.emit('moveend');
+  view.markerManager.markers[0].coordinates = [0.5, 0.5];
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['fallback', 'road']);
+  assert.deepEqual(mainConnections(map)[0].geometry.coordinates[0], [0.5, 0.5]);
+  assert.deepEqual(mainConnections(map)[1].geometry.coordinates, roadBC.coordinates);
+  view.markerManager.markers.forEach((marker, index) => {
+    marker.entry.getValue = () => ({ toString: () => String(2 - index) });
+  });
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['fallback', 'fallback']);
+  assert.equal(mainConnections(map)[0].properties.from, 'third.md');
+  assert.equal(mainConnections(map)[0].properties.to, 'end.md');
+  assert.equal(client.calls.length, 1);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+test('zooming out while a road search is pending does not cancel its captured detailed roads', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings } = setup(true, client);
+  const roads = attachRoads(map);
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  const cancellations = client.cancellations;
+  for (const zoom of [13, 6]) {
+    roads.zoom = zoom;
+    map.emit('moveend');
+    map.emit('idle');
+  }
+  assert.equal(client.cancellations, cancellations);
+  await waitForRouting();
+  assert.equal(client.calls.length, 1);
+  client.finish(0, [roadAB]);
+  await flushRouting();
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'road');
+  assert.deepEqual(mainConnections(map)[0].geometry.coordinates, roadAB.coordinates);
+  assert.equal(roads.queries, 1);
+  overlay.destroy();
+});
+
+test('a late result for moved endpoints cannot populate retained paths for the former connection', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, view } = setup(true, client);
+  const roads = attachRoads(map);
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await waitForRouting();
+  roads.zoom = 6;
+  map.emit('moveend');
+  view.markerManager.markers[1].coordinates = [3, 3];
+  overlay.update();
+  client.finish(0, [roadAB]);
+  await flushRouting();
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'fallback');
+  assert.deepEqual(mainConnections(map)[0].geometry.coordinates[1], [3, 3]);
+  view.markerManager.markers[1].coordinates = [2, 2];
+  overlay.update();
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'fallback');
+  assert.equal(client.calls.length, 1);
   assertOriginalResources(map);
   overlay.destroy();
 });

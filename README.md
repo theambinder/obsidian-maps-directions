@@ -20,7 +20,7 @@ create a second map layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.2.0 is a testing prerelease, not an Obsidian directory submission.
+Version 0.2.1 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -30,7 +30,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.2.0.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.2.1.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -76,14 +76,21 @@ for a short path between each adjacent pair of markers. It keeps the order set b
 
 The standard OpenFreeMap backgrounds are the intended starting point. Custom
 raster backgrounds contain pictures rather than road geometry, and other vector
-schemas may not expose a compatible road source. An unsupported source falls back
-to direct dashed connections.
+schemas may not expose a compatible road source. Connections without a retained
+road path fall back to direct dashed lines when the source is unsupported.
 
-For a first test, use nearby stops within a small city area and zoom in until the
-streets and paths are detailed (zoom level 14 or closer). Wait for Maps to finish loading. A wide view of a
+For the first calculation, use nearby stops within a small city area and zoom in
+until the streets and paths are detailed (zoom level 14 or closer). Wait for Maps
+to finish loading. Once a road path is found, its geometry stays visible when you
+zoom out or pan, even after those detailed road tiles leave the loaded area.
+Changing the map style also keeps paths already found for the current connections.
+
+New or unresolved connections still need detailed loaded roads. A wide view of a
 country does not contain every small street: available road detail depends on the
-map's zoom level and loaded tiles. A route may be unavailable when its connecting
-roads or necessary detour lie outside the loaded area.
+map's zoom level and loaded tiles. A path may be unavailable when its connecting
+roads or necessary detour lie outside the loaded area. Moving stops or changing
+**Sequence**, filters or route groups updates the current connections; a retained
+path is reused only when its endpoints still match.
 
 Run **Maps Directions: Open local roads demo** for three public example stops
 around Tokyo Station, with a detailed map and local routing already selected.
@@ -105,10 +112,13 @@ road path and explains when more map detail is needed.
 
 Graph construction and path search run in a bundled background worker. Input
 and search limits keep the experimental mode bounded; at most 200 connections
-are searched per update, with the rest shown as dashed fallback connections.
+are searched per update. Connections without a searched or retained road path
+use dashed fallback lines.
 
-Road data and the temporary network stay in memory for the active view. This
-release does not download offline areas or persist a road database. Maps loads
+Road data, the temporary network and retained route geometry stay in memory for
+the active view. Closing and reopening the view requires detailed roads again
+for its first calculation. This release does not download offline areas or
+persist a road database or route cache on disk. Maps loads
 its background as usual; there is no new routing service, API key or additional
 tile request from Directions. The availability of the Maps background without
 internet depends on its own loaded data and cache. Local calculation alone does

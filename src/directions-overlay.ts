@@ -2,7 +2,7 @@ import type { FeatureCollection, MapLike, MapsViewLike, OverlayLike } from './co
 import { buildDirections, normalizeLongitude } from './geometry';
 import { collectLocalRoads, type RoadSnapshot } from './local-roads';
 import { LocalRoutingClient, type RoutingClient } from './local-routing-client';
-import type { RoutingResult } from './routing-protocol';
+import type { RoadRoute, RoutingResult } from './routing-protocol';
 import { readOptions } from './settings';
 
 export const RESOURCE_PREFIX = 'obsidian-maps-directions-';
@@ -61,6 +61,8 @@ export class DirectionsOverlay implements OverlayLike {
   private routedData: FeatureCollection | null = null;
   private routingGeneration = 0;
   private routingTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingInputKey = '';
+  private readonly retainedRoutes = new Map<string, RoadRoute>();
   private routingStatus = 'Straight-line connections.';
   private readonly onMapEvent = (): void => this.update();
   private readonly onRoadsChanged = (...args: unknown[]): void => {
@@ -188,6 +190,7 @@ export class DirectionsOverlay implements OverlayLike {
     if (this.destroyed) return;
     this.destroyed = true;
     this.releaseMap();
+    this.retainedRoutes.clear();
   }
 
   private removeLayer(map: MapLike, id: string): void {
@@ -204,6 +207,28 @@ export class DirectionsOverlay implements OverlayLike {
       this.routingStatus = 'Straight-line connections. Select Follow roads (local) in Routing to try loaded roads.';
       return direct;
     }
+    // A route belongs to its endpoints, not to the camera or the current tile set.
+    // Cache geometry only; all note properties and access lines use current markers.
+    const keys = direct.features.map(routeKey);
+    const currentKeys = new Set(keys.slice(0, 200));
+    for (const key of this.retainedRoutes.keys()) if (!currentKeys.has(key)) this.retainedRoutes.delete(key);
+    const missing = keys.slice(0, 200).flatMap((key, index) => this.retainedRoutes.has(key) ? [] : [index]);
+    const inputKey = JSON.stringify(direct);
+    const retainedData = (): FeatureCollection => applyRoadRoutes(direct, {
+      id: 0, routes: keys.map(key => this.retainedRoutes.get(key) ?? null),
+      stats: { nodes: 0, edges: 0, truncated: false },
+    });
+    const retainedCount = keys.filter(key => this.retainedRoutes.has(key)).length;
+    if (!missing.length) {
+      if (this.pendingInputKey) this.stopRoutingJob();
+      const key = `retained:${inputKey}`;
+      if (this.routingKey !== key || !this.routedData) this.routedData = retainedData();
+      this.routingKey = key;
+      this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads; ${direct.features.length - retainedCount} use dashed straight fallback. Found paths stay visible at every zoom level while this view is open.`;
+      return this.routedData!;
+    }
+    // A camera change must not cancel a search already using detailed captured roads.
+    if (this.pendingInputKey === inputKey && this.routedData) return this.routedData;
     if (this.roadsDirty || !this.roads) {
       try { this.roads = collectLocalRoads(map); }
       catch { this.roads = { key: 'unsupported', state: 'unsupported', sources: [], features: [] }; }
@@ -214,7 +239,7 @@ export class DirectionsOverlay implements OverlayLike {
     if (this.routingKey === key && this.routedData) return this.routedData;
     this.stopRoutingJob();
     this.routingKey = key;
-    this.routedData = { type: 'FeatureCollection', features: direct.features.map(feature => ({ ...feature, properties: { ...feature.properties, connectionKind: 'fallback' } })) };
+    this.routedData = retainedData();
     const reasons = {
       zoom: 'Zoom in to level 14 or closer to load detailed roads.',
       unsupported: 'This background does not expose a supported vector road layer.',
@@ -222,24 +247,32 @@ export class DirectionsOverlay implements OverlayLike {
       limited: 'This area has too much road data. Zoom in to a smaller area.',
       ready: 'Finding paths on loaded roads…',
     };
-    this.routingStatus = `Local roads: ${reasons[roads.state]} Straight connections are shown dashed.`;
+    this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads. ${reasons[roads.state]} Unresolved connections are shown dashed.`;
     if (roads.state !== 'ready') return this.routedData;
     const generation = this.routingGeneration;
+    this.pendingInputKey = inputKey;
     this.routingTimer = setTimeout(() => {
       this.routingTimer = null;
-      const legs = direct.features.slice(0, 200).map(feature => {
+      const legs = missing.map(index => {
+        const feature = direct.features[index];
         const [from, to] = feature.geometry.coordinates;
         return { from: [normalizeLongitude(from[0]), from[1]] as [number, number], to: [normalizeLongitude(to[0]), to[1]] as [number, number] };
       });
       void this.routingClient.route(roads, legs).then(result => {
         if (this.destroyed || generation !== this.routingGeneration || this.map !== map) return;
-        this.routedData = applyRoadRoutes(direct, result);
+        this.pendingInputKey = '';
+        missing.forEach((index, routeIndex) => {
+          const route = result.routes[routeIndex];
+          if (isUsableRoute(route)) this.retainedRoutes.set(keys[index], route);
+        });
+        this.routedData = retainedData();
         const routed = this.routedData.features.filter(feature => feature.properties.connectionKind === 'road').length;
-        this.routingStatus = `Local roads: ${routed}/${direct.features.length} connections follow roads; ${direct.features.length - routed} use dashed straight fallback. ${result.stats.nodes} road nodes. Approximate paths in the loaded area only.${result.stats.truncated ? ' Road data limit reached.' : ''}`;
+        this.routingStatus = `Local roads: ${routed}/${direct.features.length} connections follow roads; ${direct.features.length - routed} use dashed straight fallback. ${result.stats.nodes} road nodes. Found paths stay visible when zooming out.${result.stats.truncated ? ' Road data limit reached.' : ''}`;
         this.update();
       }, () => {
         if (this.destroyed || generation !== this.routingGeneration || this.map !== map) return;
-        this.routingStatus = 'Local roads: search could not finish. Straight connections are shown dashed. Try a smaller area.';
+        this.pendingInputKey = '';
+        this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads. Search could not finish; found paths are kept and unresolved connections are shown dashed. Try a smaller area.`;
       });
     }, 150);
     return this.routedData;
@@ -249,6 +282,7 @@ export class DirectionsOverlay implements OverlayLike {
     this.routingGeneration++;
     if (this.routingTimer) clearTimeout(this.routingTimer);
     this.routingTimer = null;
+    this.pendingInputKey = '';
     this.routingClient.cancel();
   }
 
@@ -285,12 +319,21 @@ export class DirectionsOverlay implements OverlayLike {
   }
 }
 
+function routeKey(feature: FeatureCollection['features'][number]): string {
+  return JSON.stringify(feature.geometry.coordinates.map(([lon, lat]) => [normalizeLongitude(lon), lat]));
+}
+
+function isUsableRoute(route: RoadRoute | null | undefined): route is RoadRoute {
+  return !!route && route.coordinates.length >= 2 && Number.isFinite(route.distance) &&
+    route.coordinates.every(point => Number.isFinite(point[0]) && Number.isFinite(point[1]));
+}
+
 /** Keep marker positions exact. Small access segments are distinguished from the road path. */
 export function applyRoadRoutes(direct: FeatureCollection, result: RoutingResult): FeatureCollection {
   const features: FeatureCollection['features'] = [];
   direct.features.forEach((feature, index) => {
     const route = result.routes[index];
-    if (!route || route.coordinates.length < 2 || route.coordinates.some(point => !Number.isFinite(point[0]) || !Number.isFinite(point[1]))) {
+    if (!isUsableRoute(route)) {
       features.push({ ...feature, properties: { ...feature.properties, connectionKind: 'fallback' } });
       return;
     }

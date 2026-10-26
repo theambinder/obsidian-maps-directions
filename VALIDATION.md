@@ -1,3 +1,26 @@
+# Validation — Maps Directions 0.2.1
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 26 October 2026.
+
+- All 75 automated tests pass; strict TypeScript, bundling and installation ZIP pass.
+- In actual Obsidian, the local Tokyo demo found both road paths. After several
+  zoom-out steps to a wider city overview, both paths retained their road shapes
+  and direction arrows. Diagnostics still reported 2/2 road paths and no fallback.
+- Six regression tests cover exact geometry retention across zoom 13 and 6,
+  panning, style reload and map recreation; partial-route worker result indexing;
+  failures/null results preserving existing successes; changed endpoints and
+  reversed Sequence; pending searches at zoom-out; and stale replies.
+- Successful geometry is matched by ordered endpoint coordinates. Current marker
+  properties and access segments are regenerated; obsolete connections are removed.
+- The cache belongs to the open view, stays in memory, and is destroyed with it.
+  Unresolved connections still need detailed loaded roads for their first search.
+- Original Maps markers, styling and background loading remain unchanged.
+
+No on-disk route database, additional tile download or routing service was added.
+Mobile visual testing and future upstream compatibility remain pending.
+
+---
+
 # Validation — Maps Directions 0.2.0
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 26 October 2026.
