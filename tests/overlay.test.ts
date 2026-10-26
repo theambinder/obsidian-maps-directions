@@ -537,3 +537,127 @@ test('a late result for moved endpoints cannot populate retained paths for the f
   assertOriginalResources(map);
   overlay.destroy();
 });
+
+function groupedMarker(path: string, coordinate: number, sequence: number, route: string, color: () => string = () => ''): MapsMarker {
+  return {
+    coordinates: [coordinate, coordinate],
+    entry: {
+      file: { path },
+      getValue: property => {
+        const value = property === 'sequence' ? String(sequence) : property === 'route' ? route : property === 'routeColor' ? color() : null;
+        return value === null ? null : { toString: () => value };
+      },
+    },
+  };
+}
+
+function groupPairs(view: MapsViewLike, colorA: () => string = () => '', colorB: () => string = () => ''): void {
+  view.markerManager.markers = [
+    groupedMarker('a1.md', 1, 1, 'Day 1', colorA), groupedMarker('a2.md', 2, 2, 'Day 1', colorA),
+    groupedMarker('b1.md', 3, 1, 'Day 2', colorB), groupedMarker('b2.md', 4, 2, 'Day 2', colorB),
+  ];
+}
+
+function assertMatchingArrowImages(map: FakeMap): void {
+  for (const feature of mainConnections(map)) {
+    const color = String(feature.properties.lineColor);
+    const image = map.images.get(String(feature.properties.arrowImage));
+    assert.ok(image, `Missing arrow image for ${color}`);
+    const opaquePixel = [...image.data].findIndex((value, index) => index % 4 === 3 && value === 255) - 3;
+    assert.ok(opaquePixel >= 0);
+    const channels = [1, 3, 5].map(offset => Number.parseInt(color.slice(offset, offset + 2), 16));
+    assert.deepEqual([...image.data.slice(opaquePixel, opaquePixel + 3)], channels);
+  }
+}
+
+test('random groups use different consistent colors for solid lines, fallback lines and their arrow bitmaps', () => {
+  const { overlay, map, settings, view, errors } = setup();
+  groupPairs(view);
+  settings[KEYS.group] = 'route';
+  settings[KEYS.colorMode] = 'random';
+  overlay.update();
+  const colors = mainConnections(map).map(feature => feature.properties.lineColor);
+  assert.equal(new Set(colors).size, 2);
+  assertMatchingArrowImages(map);
+  const solid = [...map.layers.values()].find(layer => layer.type === 'line')!;
+  assert.deepEqual((solid.paint as Record<string, unknown>)['line-color'], ['get', 'lineColor']);
+  const arrows = [...map.layers.values()].find(layer => layer.type === 'symbol')!;
+  assert.deepEqual((arrows.layout as Record<string, unknown>)['icon-image'], ['get', 'arrowImage']);
+  settings[KEYS.routeMode] = 'local'; // No vector source: both groups become dashed fallback.
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['fallback', 'fallback']);
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.lineColor), colors);
+  const dashed = [...map.layers.values()].find(layer => (layer.paint as Record<string, unknown> | undefined)?.['line-dasharray'])!;
+  assert.deepEqual((dashed.paint as Record<string, unknown>)['line-color'], ['get', 'lineColor']);
+  assertMatchingArrowImages(map);
+  const mutations = map.mutations.length;
+  for (let i = 0; i < 10; i++) map.emit('idle');
+  assert.equal(map.mutations.length, mutations);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+test('switching random groups to one color removes unused images and restores only owned resources after style reload', () => {
+  const { overlay, map, settings, view, errors } = setup();
+  groupPairs(view);
+  settings[KEYS.group] = 'route';
+  settings[KEYS.colorMode] = 'random';
+  overlay.update();
+  const oldImages = [...map.images.keys()].filter(id => id.startsWith(RESOURCE_PREFIX));
+  assert.equal(oldImages.length, 2);
+  settings[KEYS.colorMode] = 'single';
+  settings[KEYS.color] = '#2583e8';
+  overlay.update();
+  assert.ok(oldImages.every(id => !map.images.has(id)));
+  assert.equal(map.images.size, 2); // One Maps image and one Directions image.
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.lineColor), ['#2583e8', '#2583e8']);
+  assertMatchingArrowImages(map);
+  map.reloadStyle();
+  assert.equal(map.images.size, 2);
+  assertMatchingArrowImages(map);
+  assertOriginalResources(map);
+  overlay.destroy();
+  assert.equal(map.images.size, 1);
+  assert.equal(map.sources.size, 1);
+  assert.equal(map.layers.size, 1);
+  assert.ok([...map.listeners.values()].every(handlers => handlers.size === 0));
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+});
+
+test('editing a color property recolors retained road geometry and arrows without another road search', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, view, errors } = setup(true, client);
+  const roads = attachRoads(map);
+  let colorA = '#ff0000';
+  const colorB = '#00ff00';
+  groupPairs(view, () => colorA, () => colorB);
+  settings[KEYS.group] = 'route';
+  settings[KEYS.routeMode] = 'local';
+  settings[KEYS.colorMode] = 'property';
+  settings[KEYS.colorProperty] = 'routeColor';
+  overlay.update();
+  await waitForRouting();
+  const roadCD: RoadRoute = { coordinates: [[3, 3], [3.5, 3], [4, 4]], distance: 120 };
+  client.finish(0, [roadAB, roadCD]);
+  await flushRouting();
+  const geometry = structuredClone(mainConnections(map).map(feature => feature.geometry));
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.lineColor), ['#ff0000', '#00ff00']);
+  const oldImage = String(mainConnections(map)[0].properties.arrowImage);
+  assertMatchingArrowImages(map);
+  const queries = roads.queries;
+  colorA = '#2583e8';
+  overlay.update();
+  await waitForRouting();
+  assert.equal(client.calls.length, 1);
+  assert.equal(roads.queries, queries);
+  assert.deepEqual(mainConnections(map).map(feature => feature.geometry), geometry);
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['road', 'road']);
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.lineColor), ['#2583e8', '#00ff00']);
+  assert.equal(map.images.has(oldImage), false);
+  assertMatchingArrowImages(map);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+});

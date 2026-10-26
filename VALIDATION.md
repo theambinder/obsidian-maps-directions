@@ -1,3 +1,33 @@
+# Validation — Maps Directions 0.3.0
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 27 October 2026.
+
+- All 92 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- All added options now belong to the single English Directions group.
+- Actual native UI switches between Single color, Random by route and Color property.
+  Single color shows the existing Line color selector; property mode shows the
+  Color property selector; random mode hides both dependent inputs immediately.
+- The two grouped local-demo routes render in distinct automatic colors. Single
+  color restores the saved Violet color; property mode reads RouteColor and uses
+  the configured blue/orange examples. Original Maps marker colors stay unchanged.
+- With direction arrows enabled, their bitmap colors match the corresponding route.
+  The original arrow visibility preference was restored after the visual check.
+- Regression tests verify solid/fallback/access color consistency, per-color image
+  cleanup on mode changes/style reload/unload, and that color edits preserve local
+  road geometry without a new road search or query.
+- Pure model tests cover stable group colors across ordering/filtering/reload,
+  numeric Sequence/path property precedence, invalid/missing values and CSS formats.
+- Sequence remains optional and cleared selections stay empty. Existing zoom/pan
+  road-geometry retention continues to pass all prior regressions.
+- Demo notes include an independent RouteColor property and the Stops table exposes
+  it. Existing Sequence, grouping, marker styles and the original empty view remain.
+
+Routing and original map ownership are unchanged. No routing API, extra tile
+request, telemetry or persistent road database was added. Mobile visual testing
+and future upstream compatibility remain pending.
+
+---
+
 # Validation — Maps Directions 0.2.2
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 26 October 2026.

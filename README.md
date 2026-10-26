@@ -2,13 +2,14 @@
 
 Add ordered lines and direction arrows to the **Map** layout supplied by the
 official [Maps plugin](https://github.com/obsidianmd/obsidian-maps) for Obsidian Bases.
-Choose direct connections or experimental paths along roads already loaded by Maps.
+Choose direct connections or experimental paths along roads already loaded by Maps,
+with one line color, automatic colors per route, or colors from a note property.
 
 This is a companion plugin. Official Maps continues to render every marker,
 icon, marker color, popup and map background. Its existing **Display**, **Markers**
-and **Background** settings remain available. This plugin appends **Directions**
-and **Connection style** groups to the same Map layout. It does not
-create a second map layout or bundle a map engine.
+and **Background** settings remain available. This plugin appends a single **Directions** group to the same Map layout,
+including route and line appearance settings. It does not create a second map
+layout or bundle a map engine.
 
 ## Requirements and installation
 
@@ -20,7 +21,7 @@ create a second map layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.2.2 is a testing prerelease, not an Obsidian directory submission.
+Version 0.3.0 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -30,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.2.2.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.3.0.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -41,7 +42,9 @@ The installation ZIP is `dist/maps-directions-0.2.2.zip`. You can also copy
 3. Turn on **Connect markers** and choose a numeric **Sequence property**, for example `Sequence`.
 4. Optionally choose **Separate routes by**, for example `Route`, to draw independent chains.
 5. In **Directions → Route mode**, choose **Straight line** or **Follow roads (local)**.
-6. Use **Connection style** to set line color, width, opacity and arrow size.
+6. Choose **Line color mode**: **Single color**, **Random by route** or **Color property**.
+   The matching **Line color** or **Color property** control appears below it.
+7. Adjust line width, opacity and arrow size in the same **Directions** group.
 
 Connections are disabled by default for existing views. **Straight line** remains
 the default route mode, including for bases created by version 0.1.0. Settings are
@@ -91,6 +94,41 @@ The grouping example in the local demo uses the same `Route` property to show
 two independent routes; existing Sequence values determine the order within each.
 Newly generated local demos include a **Separate routes example** Map view and
 a **Route** column in **Stops**. The demo command does not rewrite existing files.
+
+## Route colors
+
+All color controls are inside **Directions**. **Single color** is the default,
+so existing views keep their selected line color.
+
+| Line color mode | Behavior | Control shown below it |
+| --- | --- | --- |
+| **Single color** | Every connection uses the same color. | **Line color**, with the existing color choices. |
+| **Random by route** | Each value of **Separate routes by** gets a stable automatically generated color. | No additional color control. |
+| **Color property** | Each route takes its color from the selected note or formula property. | **Color property**, a property selector. |
+
+Automatic colors are derived from the route group value. They stay consistent
+when you zoom, pan, reopen the view, reorder markers or filter other groups.
+A blank route value is one group. Without **Separate routes by**, all sequenced
+markers belong to one route and receive one automatic color.
+
+For property colors, select a field such as `RouteColor`. For example:
+
+| Route | RouteColor | Result |
+| --- | --- | --- |
+| Day 1 | `#2583e8` | Blue lines and arrows for the first day. |
+| Day 2 | `#ef8733` | Orange lines and arrows for the second day. |
+
+Put the same value on the stops of each route to make the intent clear. If values
+within a route differ, the first valid color in Sequence order is used for the
+whole route; equal sequence values use note path order. Missing, empty or invalid
+colors fall back to the view's saved **Line color** selection. Clearing the color
+property selection also uses that fallback.
+
+Color values can use hex notation, `rgb()`, `hsl()` or CSS color names. Colors are
+normalized to opaque RGB; use **Line opacity** to control transparency. Lines,
+road paths, dashed fallback/access segments and direction arrows share the route
+color. Changing color settings updates their appearance without calculating the
+road path again. Original Maps marker colors remain controlled by Maps.
 
 ## Follow roads locally
 
@@ -196,8 +234,9 @@ No marker coordinates or note contents are sent to an additional routing provide
 - `src/adapter.ts` — Maps/Bases capability checks, registration and lifecycle hooks.
 - `src/geometry.ts` — numeric ordering, route grouping and direct line geometry.
 - `src/road-graph.ts` — local road network and path search.
+- `src/route-colors.ts` — stable group colors and property color selection.
 - `src/directions-overlay.ts` — owned MapLibre layers and cleanup.
-- `src/settings.ts` — the additional view setting groups.
+- `src/settings.ts` — the additional Directions settings.
 - `src/demo.ts` — generated example data; no personal vault data is included.
 - `tests/` — model, routing, overlay ownership and adapter lifecycle checks.
 

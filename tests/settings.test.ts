@@ -20,10 +20,55 @@ test('a missing, cleared or invalid Sequence property stays unselected', () => {
 
 test('Sequence has no fallback default and Route mode belongs to Directions', () => {
   const groups = directionSettings();
-  assert.deepEqual(groups.map(group => group.displayName), ['Directions', 'Connection style']);
+  assert.deepEqual(groups.map(group => group.displayName), ['Directions']);
   const directions = groups[0];
   assert.ok(directions.type === 'group');
   const sequence = directions.items.find(option => option.key === KEYS.sequence)!;
   assert.equal(Object.hasOwn(sequence, 'default'), false);
   assert.ok(directions.items.some(option => option.key === KEYS.routeMode));
+});
+
+test('color modes retain the single-color default and preserve an optional property selection', () => {
+  const values: Record<string, unknown> = {};
+  const options: ViewConfigLike = {
+    get: key => values[key],
+    getAsPropertyId: key => typeof values[key] === 'string' && values[key].startsWith('note.') ? values[key] as string : null,
+  };
+  assert.equal(readOptions(options).colorMode, 'single');
+  assert.equal(readOptions(options).colorProperty, null);
+  assert.equal(readOptions(options).color, '#7c5cff');
+  values[KEYS.colorMode] = 'random';
+  assert.equal(readOptions(options).colorMode, 'random');
+  values[KEYS.colorMode] = 'property';
+  values[KEYS.colorProperty] = 'note.RouteColor';
+  assert.equal(readOptions(options).colorMode, 'property');
+  assert.equal(readOptions(options).colorProperty, 'note.RouteColor');
+  values[KEYS.colorMode] = 'unknown';
+  assert.equal(readOptions(options).colorMode, 'single');
+});
+
+test('color-specific controls follow the current mode without rebuilding the settings definitions', () => {
+  let mode: unknown;
+  const groups = directionSettings({ get: key => key === KEYS.colorMode ? mode : undefined });
+  const directions = groups[0];
+  assert.ok(directions.type === 'group');
+  const single = directions.items.find(option => option.key === KEYS.color)!;
+  const property = directions.items.find(option => option.key === KEYS.colorProperty)!;
+  assert.equal(Object.hasOwn(property, 'default'), false);
+  assert.equal(single.shouldHide?.(), false);
+  assert.equal(property.shouldHide?.(), true);
+  mode = 'random';
+  assert.equal(single.shouldHide?.(), true);
+  assert.equal(property.shouldHide?.(), true);
+  mode = 'property';
+  assert.equal(single.shouldHide?.(), true);
+  assert.equal(property.shouldHide?.(), false);
+  mode = 'single';
+  assert.equal(single.shouldHide?.(), false);
+  assert.equal(property.shouldHide?.(), true);
+  const propertyOption = property;
+  assert.ok(propertyOption.type === 'property');
+  assert.equal(propertyOption.filter?.('note.RouteColor'), true);
+  assert.equal(propertyOption.filter?.('formula.RouteColor'), true);
+  assert.equal(propertyOption.filter?.('file.name'), false);
 });

@@ -153,7 +153,12 @@ export class MapsAdapter {
         adapter.fail('Maps returned an unsupported settings format. The original Map settings remain available.');
         return options;
       }
-      try { return [...options, ...directionSettings()]; }
+      try {
+        const config = record(args[0]);
+        const get = config?.get;
+        const reader = callable(get) ? { get: (key: string): unknown => get.call(config, key) } : undefined;
+        return [...options, ...directionSettings(reader)];
+      }
       catch {
         adapter.fail('Directions settings could not be added. The original Map settings remain available.');
         return options;

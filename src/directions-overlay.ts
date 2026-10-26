@@ -4,6 +4,8 @@ import { collectLocalRoads, type RoadSnapshot } from './local-roads';
 import { LocalRoutingClient, type RoutingClient } from './local-routing-client';
 import type { RoadRoute, RoutingResult } from './routing-protocol';
 import { readOptions } from './settings';
+import { colorDirections } from './route-colors';
+import { createLineColorResolver } from './browser-colors';
 
 export const RESOURCE_PREFIX = 'obsidian-maps-directions-';
 const sessionId = Date.now().toString(36);
@@ -51,7 +53,8 @@ export class DirectionsOverlay implements OverlayLike {
   private map: MapLike | null = null;
   private dataSignature: string | null = null;
   private styleSignature: string | null = null;
-  private imageColor: string | null = null;
+  private readonly arrowImages = new Map<string, string>();
+  private readonly normalizeColor = createLineColorResolver();
   private updating = false;
   private destroyed = false;
   private suspended = false;
@@ -113,9 +116,31 @@ export class DirectionsOverlay implements OverlayLike {
       }
       if (!map.isStyleLoaded()) return;
 
-      const data = this.connectionData(map, directData, options.routeMode);
+      // Color decoration stays outside routing identity: color edits never rerun road search.
+      const colored = colorDirections(this.connectionData(map, directData, options.routeMode), this.view.markerManager.markers, { ...options, normalizeColor: this.normalizeColor });
+      const data: FeatureCollection = { type: 'FeatureCollection', features: colored.features.map(feature => ({
+        ...feature, properties: { ...feature.properties, arrowImage: `${this.imageId}-${String(feature.properties.lineColor).slice(1)}` },
+      })) };
       const dataSignature = JSON.stringify(data);
       const styleSignature = JSON.stringify([options.arrows, options.color, options.width, options.opacity, options.arrowSize, options.routeMode]);
+      const colors = new Set(options.arrows ? data.features.filter(feature => feature.properties.connectionKind !== 'connector').map(feature => String(feature.properties.lineColor)) : []);
+      const paletteChanged = colors.size !== this.arrowImages.size || [...colors].some(color => !this.arrowImages.has(color));
+      if (styleSignature !== this.styleSignature) {
+        this.removeLayer(map, this.arrowId);
+        this.removeLayer(map, this.lineId);
+        this.removeLayer(map, this.dashedId);
+      }
+      if (paletteChanged) this.removeLayer(map, this.arrowId);
+      for (const [color, id] of this.arrowImages) {
+        if (colors.has(color)) continue;
+        if (map.hasImage(id)) map.removeImage(id);
+        this.arrowImages.delete(color);
+      }
+      for (const color of colors) {
+        const id = `${this.imageId}-${color.slice(1)}`;
+        if (!map.hasImage(id)) map.addImage(id, createArrowImage(color), { pixelRatio: 2 });
+        this.arrowImages.set(color, id);
+      }
       let source = map.getSource(this.sourceId);
       if (!source) {
         map.addSource(this.sourceId, { type: 'geojson', data });
@@ -123,17 +148,6 @@ export class DirectionsOverlay implements OverlayLike {
       } else if (dataSignature !== this.dataSignature) {
         source.setData(data);
         this.dataSignature = dataSignature;
-      }
-
-      if (styleSignature !== this.styleSignature) {
-        this.removeLayer(map, this.arrowId);
-        this.removeLayer(map, this.lineId);
-        this.removeLayer(map, this.dashedId);
-      }
-      if ((!options.arrows || this.imageColor !== options.color) && map.hasImage(this.imageId)) {
-        this.removeLayer(map, this.arrowId);
-        map.removeImage(this.imageId);
-        this.imageColor = null;
       }
       const beforeId = map.getLayer('marker-pins') ? 'marker-pins' : undefined;
       if (!map.getLayer(this.lineId)) {
@@ -143,7 +157,7 @@ export class DirectionsOverlay implements OverlayLike {
           source: this.sourceId,
           filter: ['all', ['!=', ['get', 'connectionKind'], 'fallback'], ['!=', ['get', 'connectionKind'], 'connector']],
           layout: { 'line-cap': 'round', 'line-join': 'round' },
-          paint: { 'line-color': options.color, 'line-width': options.width, 'line-opacity': options.opacity },
+          paint: { 'line-color': ['get', 'lineColor'], 'line-width': options.width, 'line-opacity': options.opacity },
         }, beforeId);
       }
       if (options.routeMode === 'local' && !map.getLayer(this.dashedId)) {
@@ -151,14 +165,10 @@ export class DirectionsOverlay implements OverlayLike {
           id: this.dashedId, type: 'line', source: this.sourceId,
           filter: ['in', ['get', 'connectionKind'], ['literal', ['fallback', 'connector']]],
           layout: { 'line-cap': 'round', 'line-join': 'round' },
-          paint: { 'line-color': options.color, 'line-width': options.width, 'line-opacity': options.opacity * 0.7, 'line-dasharray': [2, 2] },
+          paint: { 'line-color': ['get', 'lineColor'], 'line-width': options.width, 'line-opacity': options.opacity * 0.7, 'line-dasharray': [2, 2] },
         }, beforeId);
       }
       if (options.arrows) {
-        if (!map.hasImage(this.imageId)) {
-          map.addImage(this.imageId, createArrowImage(options.color), { pixelRatio: 2 });
-          this.imageColor = options.color;
-        }
         if (!map.getLayer(this.arrowId)) {
           map.addLayer({
             id: this.arrowId,
@@ -167,7 +177,7 @@ export class DirectionsOverlay implements OverlayLike {
             filter: ['!=', ['get', 'connectionKind'], 'connector'],
             layout: {
               'symbol-placement': 'line-center',
-              'icon-image': this.imageId,
+              'icon-image': ['get', 'arrowImage'],
               'icon-size': options.arrowSize,
               'icon-keep-upright': false,
               'icon-rotation-alignment': 'map',
@@ -304,7 +314,8 @@ export class DirectionsOverlay implements OverlayLike {
     this.map = null;
     this.dataSignature = null;
     this.styleSignature = null;
-    this.imageColor = null;
+    const imageIds = [...this.arrowImages.values()];
+    this.arrowImages.clear();
     this.clearRouting();
     if (!map) return;
     const cleanup = [
@@ -316,7 +327,7 @@ export class DirectionsOverlay implements OverlayLike {
       () => this.removeLayer(map, this.lineId),
       () => this.removeLayer(map, this.dashedId),
       () => { if (map.getSource(this.sourceId)) map.removeSource(this.sourceId); },
-      () => { if (map.hasImage(this.imageId)) map.removeImage(this.imageId); },
+      ...imageIds.map(id => () => { if (map.hasImage(id)) map.removeImage(id); }),
     ];
     for (const operation of cleanup) {
       try { operation(); } catch (error) { this.report(error); }

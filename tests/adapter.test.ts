@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MapsAdapter, type AdapterStatus } from '../src/adapter';
 import type { MapsViewLike, OverlayLike } from '../src/contracts';
+import { KEYS } from '../src/settings';
+import type { BasesAllOptions } from 'obsidian';
 
 type Fn = (this: unknown, ...args: unknown[]) => unknown;
 type TestView = MapsViewLike & { cleanups: Array<() => void>; _children: unknown[] };
@@ -83,9 +85,29 @@ test('wraps the existing registration, preserves this/arguments/view, and append
   const result = h.registration.options.apply(receiver, args) as Array<{ displayName: string }>;
   assert.deepEqual(calls, [{ receiver, args }, { receiver, args }]);
   assert.equal(result[0], originalGroup);
-  assert.deepEqual(result.slice(1).map(group => group.displayName), ['Directions', 'Connection style']);
+  assert.deepEqual(result.slice(1).map(group => group.displayName), ['Directions']);
   assert.deepEqual(originalOptions, [originalGroup]);
   assert.equal(h.status()?.state, 'ready');
+});
+
+test('passes the original Bases config to live conditional Directions settings without changing its receiver', t => {
+  const h = harness();
+  t.after(() => h.adapter.stop());
+  h.adapter.start();
+  const config = {
+    mode: 'single',
+    get(this: { mode: string }, key: string) { assert.equal(this, config); return key === KEYS.colorMode ? this.mode : undefined; },
+  };
+  const result = h.registration.options(config) as BasesAllOptions[];
+  const directions = result.find(option => option.displayName === 'Directions')!;
+  assert.ok(directions.type === 'group');
+  const single = directions.items.find(option => option.key === KEYS.color)!;
+  const property = directions.items.find(option => option.key === KEYS.colorProperty)!;
+  assert.equal(single.shouldHide?.(), false);
+  assert.equal(property.shouldHide?.(), true);
+  config.mode = 'property';
+  assert.equal(single.shouldHide?.(), true);
+  assert.equal(property.shouldHide?.(), false);
 });
 
 test('defers attachment until Bases assigns config after the factory returns', async t => {
