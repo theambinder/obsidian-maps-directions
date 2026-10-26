@@ -93,6 +93,25 @@ test('a disabled overlay makes no map mutations and subscribes to no events', ()
   assert.equal(map.listeners.size, 0);
 });
 
+test('clearing Sequence removes lines and stays empty after reopening the view', () => {
+  const { overlay, map, view, settings, errors } = setup();
+  overlay.update();
+  assert.equal(map.sources.size, 2);
+  delete settings[KEYS.sequence]; // Bases removes a cleared property key from the saved view.
+  overlay.update();
+  assert.equal(map.sources.size, 1);
+  assert.equal(map.layers.size, 1);
+  assert.match(overlay.getRoutingStatus(), /select a Sequence property/);
+  overlay.destroy();
+  const reopened = new DirectionsOverlay(view, error => errors.push(error));
+  reopened.update();
+  assert.equal(map.sources.size, 1);
+  assert.equal(map.layers.size, 1);
+  assertOriginalResources(map);
+  assert.deepEqual(errors, []);
+  reopened.destroy();
+});
+
 test('adds only its own connection layers below original Maps marker pins', () => {
   const { overlay, map, errors } = setup();
   overlay.update();

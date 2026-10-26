@@ -33,7 +33,7 @@ export function readOptions(config: ViewConfigLike): DirectionOptions {
   const color = config.get(KEYS.color);
   return {
     enabled: config.get(KEYS.enabled) === true,
-    sequenceProperty: config.getAsPropertyId(KEYS.sequence) ?? 'note.Sequence',
+    sequenceProperty: config.getAsPropertyId(KEYS.sequence),
     groupProperty: config.getAsPropertyId(KEYS.group),
     arrows: config.get(KEYS.arrows) !== false,
     color: typeof color === 'string' && Object.hasOwn(LINE_COLORS, color) ? color : '#7c5cff',
@@ -48,12 +48,10 @@ export function directionSettings(): BasesAllOptions[] {
   return [
     { type: 'group', displayName: 'Directions', items: [
       { type: 'toggle', key: KEYS.enabled, displayName: 'Connect markers', default: false },
-      { type: 'property', key: KEYS.sequence, displayName: 'Sequence property', default: 'note.Sequence', placeholder: 'Sequence', filter: p => !p.startsWith('file.') },
+      { type: 'property', key: KEYS.sequence, displayName: 'Sequence property', placeholder: 'Select a sequence property', filter: p => !p.startsWith('file.') },
       { type: 'property', key: KEYS.group, displayName: 'Separate routes by', placeholder: 'Optional property, e.g. Route', filter: p => !p.startsWith('file.') },
-      { type: 'toggle', key: KEYS.arrows, displayName: 'Show direction arrows', default: true },
-    ] },
-    { type: 'group', displayName: 'Routing', items: [
       { type: 'dropdown', key: KEYS.routeMode, displayName: 'Route mode', default: 'straight', options: { straight: 'Straight line', local: 'Follow roads (local)' } },
+      { type: 'toggle', key: KEYS.arrows, displayName: 'Show direction arrows', default: true },
     ] },
     { type: 'group', displayName: 'Connection style', items: [
       { type: 'dropdown', key: KEYS.color, displayName: 'Line color', default: '#7c5cff', options: LINE_COLORS },

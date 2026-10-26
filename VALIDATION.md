@@ -1,3 +1,28 @@
+# Validation — Maps Directions 0.2.2
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 26 October 2026.
+
+- All 78 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- Sequence property has neither a settings default nor a runtime fallback. Missing,
+  cleared and invalid selections remain unselected. Explicit selections are retained.
+- In actual Obsidian, selecting Sequence showed connections, clearing it removed them,
+  and closing/reopening the same map preserved the empty field and marker-only view.
+  Connect markers remained enabled throughout this check.
+- The English Route mode dropdown is inside Directions. There is no separate
+  Routing group; original Maps Display, Markers and Background groups remain.
+- A Separate routes example view in the local demo uses Route = Day 1 / Day 2.
+  Four markers form two independent road connections, with no connection between
+  groups. Actual routing diagnostics reported 2/2 found road paths.
+- The Stops table displays Route alongside Sequence. Existing Sequence values were
+  preserved, and the original Local roads view retains its empty sequence selection.
+- Newly generated local demos contain the grouping example and a fourth public
+  example stop. Existing demo files are not overwritten by the demo command.
+
+The local road-routing limitations and retained in-memory geometry are unchanged.
+Mobile visual testing and future upstream compatibility remain pending.
+
+---
+
 # Validation — Maps Directions 0.2.1
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 26 October 2026.

@@ -87,9 +87,14 @@ export class DirectionsOverlay implements OverlayLike {
     try {
       const options = readOptions(this.view.config);
       const map = this.view.map;
-      if (!options.enabled || !options.sequenceProperty || !map) {
+      if (!options.enabled || !map) {
         this.releaseMap();
         this.routingStatus = 'Directions are disabled or the map is not ready.';
+        return;
+      }
+      if (!options.sequenceProperty) {
+        this.releaseMap();
+        this.routingStatus = 'No connections: select a Sequence property in Directions.';
         return;
       }
       const directData = buildDirections(this.view.markerManager.markers, options.sequenceProperty, options.groupProperty);
@@ -204,7 +209,7 @@ export class DirectionsOverlay implements OverlayLike {
   private connectionData(map: MapLike, direct: FeatureCollection, mode: 'straight' | 'local'): FeatureCollection {
     if (mode === 'straight') {
       this.clearRouting();
-      this.routingStatus = 'Straight-line connections. Select Follow roads (local) in Routing to try loaded roads.';
+      this.routingStatus = 'Straight-line connections. Select Follow roads (local) in Directions to try loaded roads.';
       return direct;
     }
     // A route belongs to its endpoints, not to the camera or the current tile set.

@@ -6,8 +6,8 @@ Choose direct connections or experimental paths along roads already loaded by Ma
 
 This is a companion plugin. Official Maps continues to render every marker,
 icon, marker color, popup and map background. Its existing **Display**, **Markers**
-and **Background** settings remain available. This plugin appends **Directions**,
-**Routing** and **Connection style** groups to the same Map layout. It does not
+and **Background** settings remain available. This plugin appends **Directions**
+and **Connection style** groups to the same Map layout. It does not
 create a second map layout or bundle a map engine.
 
 ## Requirements and installation
@@ -20,7 +20,7 @@ create a second map layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.2.1 is a testing prerelease, not an Obsidian directory submission.
+Version 0.2.2 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -30,7 +30,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.2.1.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.2.2.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -38,9 +38,9 @@ The installation ZIP is `dist/maps-directions-0.2.1.zip`. You can also copy
 1. Open an existing **Map** view. Keep its current coordinates, marker icons,
    marker colors and background settings.
 2. Open that view's settings and expand **Directions**.
-3. Turn on **Connect markers** and choose **Sequence property** (default: `Sequence`).
+3. Turn on **Connect markers** and choose a numeric **Sequence property**, for example `Sequence`.
 4. Optionally choose **Separate routes by**, for example `Route`, to draw independent chains.
-5. In **Routing**, choose **Straight line** or **Follow roads (local)**.
+5. In **Directions → Route mode**, choose **Straight line** or **Follow roads (local)**.
 6. Use **Connection style** to set line color, width, opacity and arrow size.
 
 Connections are disabled by default for existing views. **Straight line** remains
@@ -48,6 +48,12 @@ the default route mode, including for bases created by version 0.1.0. Settings a
 stored per view in the `.base` file, with `directions`-prefixed keys so they do not
 replace Maps settings. Reopen an already-open base if a newly enabled integration
 is not visible. **Maps Directions: Check Maps integration** reports its status.
+
+**Sequence property** has no automatic selection. Clearing it removes all
+connections, while Maps keeps displaying the markers. It stays unselected after
+closing and reopening the map. A missing sequence selection also draws no lines,
+even when notes contain a property named `Sequence`. Views with an explicitly
+saved selection keep using that selection.
 
 Example note properties:
 
@@ -65,6 +71,26 @@ The `Sequence` and `Route` fields may also be selected from Bases formula proper
 For a ready-made example, run **Maps Directions: Open directions demo**. It creates
 four example stops in `Bases/Maps Directions Demo` and opens a base with the
 original **Map** layout plus a **Stops** table. Existing demo files are never overwritten.
+
+## Separate routes by
+
+This setting selects a property that divides markers into independent chains.
+For example, select `Route` and give the notes these values:
+
+| Stop | Route | Sequence |
+| --- | --- | --- |
+| A | Day 1 | 1 |
+| B | Day 1 | 2 |
+| C | Day 2 | 1 |
+| D | Day 2 | 2 |
+
+The map draws **A → B** for Day 1 and **C → D** for Day 2. It does not connect
+B to C. Sequence order is evaluated inside each group, so each day can start at 1.
+If **Separate routes by** is empty, all sequenced markers form one chain.
+The grouping example in the local demo uses the same `Route` property to show
+two independent routes; existing Sequence values determine the order within each.
+Newly generated local demos include a **Separate routes example** Map view and
+a **Route** column in **Stops**. The demo command does not rewrite existing files.
 
 ## Follow roads locally
 
@@ -92,7 +118,7 @@ roads or necessary detour lie outside the loaded area. Moving stops or changing
 **Sequence**, filters or route groups updates the current connections; a retained
 path is reused only when its endpoints still match.
 
-Run **Maps Directions: Open local roads demo** for three public example stops
+Run **Maps Directions: Open local roads demo** for public example stops
 around Tokyo Station, with a detailed map and local routing already selected.
 It creates `Bases/Maps Directions Local Demo` without overwriting existing files.
 **Maps Directions: Check local routing** reports how many connections found a
