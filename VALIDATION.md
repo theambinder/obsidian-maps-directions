@@ -1,3 +1,34 @@
+# Validation — Maps Directions 0.4.0
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 27 October 2026.
+
+- All 161 automated tests pass; strict TypeScript and production installation ZIP pass.
+- The actual working Map view displays four group labels and their rendered line
+  colors in the compact Routes legend, separate from the connection progress count.
+- Prepare road routes runs from one explicit click. It processed 46 areas in the
+  background, found five additional paths, displayed progress/Cancel and a completed
+  result. Both the center and zoom of the visible map remained exactly unchanged.
+- The temporary preparation map and its host were removed after completion.
+- Found paths were preserved during installation. Reloading the addon at overview
+  zoom restored saved geometry without detailed roads being visible.
+- Regression coverage includes source-only style extraction without marker/note
+  data, temporary map reuse/cleanup, bounded deadlines, cancellation during loading
+  and routing, callback backpressure, early completion, endpoint matching, stale
+  worker rejection, view/style/input lifecycle changes and property color updates.
+- Planner tests cover overlap, near-map ordering, long-distance endpoint limits,
+  date-line crossings and area caps. Road cache, accumulated detail, alternative
+  connected-network snapping and safe legend/status DOM rendering are also covered.
+- Normal rendering reads loaded road data locally. Explicit preparation can load
+  extra tile/metadata data from the existing Maps background provider; there is no
+  separate routing service, API key or bundled map renderer. Cached route geometry
+  is stored locally; detailed road geometry remains bounded in memory.
+- Connections not found in the available walking network remain dashed. This
+  approximate mode does not invent ferry, flight or missing road connections.
+- Original Maps markers, icons, marker colors, background and base settings remain
+  under Maps control. No personal vault files or cached routes are shipped.
+
+---
+
 # Validation — Maps Directions 0.3.0
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 27 October 2026.

@@ -1,12 +1,77 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MapsAdapter, type AdapterStatus } from '../src/adapter';
-import type { MapsViewLike, OverlayLike } from '../src/contracts';
+import { getBackgroundMapFactory, MapsAdapter, type AdapterStatus } from '../src/adapter';
+import type { MapLike, MapsViewLike, OverlayLike } from '../src/contracts';
+import type { BackgroundRoadMapOptions } from '../src/background-roads';
 import { KEYS } from '../src/settings';
 import type { BasesAllOptions } from 'obsidian';
 
 type Fn = (this: unknown, ...args: unknown[]) => unknown;
 type TestView = MapsViewLike & { cleanups: Array<() => void>; _children: unknown[] };
+
+test('background preparation reuses a supported installed map constructor with the supplied options', () => {
+  const constructed: unknown[] = [];
+  class NativeMap {
+    camera = { center: [114.1, 22.3], zoom: 11 };
+    style = { sources: { markers: { type: 'geojson', data: 'private marker data' } } };
+    removed = false;
+    constructor(readonly options: unknown) { constructed.push(options); }
+    on(): void {}
+    off(): void {}
+    jumpTo(): void { throw new Error('The original map must not be moved'); }
+    remove(): void { this.removed = true; }
+    getStyle(): unknown { return this.style; }
+    getZoom(): number { return this.camera.zoom; }
+    querySourceFeatures(): unknown[] { return []; }
+    isStyleLoaded(): boolean { return true; }
+  }
+  const originalOptions = { userMap: true };
+  const original = new NativeMap(originalOptions);
+  const originalCamera = original.camera, originalStyle = original.style;
+  const factory = getBackgroundMapFactory(original as unknown as MapLike);
+  assert.ok(factory);
+  assert.deepEqual(constructed, [originalOptions]);
+  const options: BackgroundRoadMapOptions = {
+    container: {} as HTMLElement,
+    style: { version: 8, sources: { roads: { type: 'vector', url: 'https://example.com/roads.json' } }, layers: [] },
+    center: [114.1, 22.3], zoom: 14, minZoom: 14, maxZoom: 14,
+    bearing: 0, pitch: 0, interactive: false, attributionControl: false, maplibreLogo: false,
+    trackResize: false, renderWorldCopies: false, pixelRatio: 1, maxTileCacheSize: 32, fadeDuration: 0,
+  };
+  const prepared = factory(options);
+  assert.ok(prepared instanceof NativeMap);
+  assert.notEqual(prepared, original);
+  assert.equal(prepared.options, options);
+  assert.deepEqual(constructed, [originalOptions, options]);
+  assert.equal(original.options, originalOptions);
+  assert.equal(original.camera, originalCamera);
+  assert.equal(original.style, originalStyle);
+  assert.equal(original.removed, false);
+});
+
+test('background preparation rejects plain objects and unsupported constructors without instantiating them', () => {
+  let constructions = 0;
+  class UnsupportedMap { constructor() { constructions++; } }
+  class IncompleteMap {
+    constructor() { constructions++; }
+    on(): void {}
+    off(): void {}
+    jumpTo(): void {}
+    remove(): void {}
+    getStyle(): void {}
+    getZoom(): number { return 14; }
+    // Missing querySourceFeatures means this renderer cannot expose road geometry.
+  }
+  const candidates = [
+    {},
+    Object.create(UnsupportedMap.prototype),
+    Object.create(IncompleteMap.prototype),
+    { constructor: () => { constructions++; } },
+    { constructor: {} },
+  ];
+  for (const candidate of candidates) assert.equal(getBackgroundMapFactory(candidate as MapLike), null);
+  assert.equal(constructions, 0);
+});
 
 function view(updater: Fn = () => 'markers updated'): TestView {
   const cleanups: Array<() => void> = [];

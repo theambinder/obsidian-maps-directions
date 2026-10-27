@@ -26,6 +26,7 @@ const MAX_SEARCH_NODES = 120000;
 const MAX_INPUT_VERTICES = 250000;
 const MAX_INPUT_LINES = 50000;
 const MAX_JOIN_CHECKS = 500000;
+const MAX_SNAP_CANDIDATES = 12;
 const ROAD_CLASSES = new Set([
   'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'minor', 'service', 'track', 'path',
   'residential', 'unclassified', 'living_street', 'footway', 'cycleway', 'pedestrian', 'steps',
@@ -149,42 +150,91 @@ class MinHeap {
 
 export class RoadGraph {
   readonly stats: RoadGraphStats;
+  private readonly components: Int32Array;
   constructor(private readonly nodes: Node[], private readonly segments: Segment[], private readonly index: SegmentIndex, truncated: boolean) {
     this.stats = { nodes: nodes.length, edges: nodes.reduce((n, node) => n + node.links.length, 0) / 2, truncated };
+    // Keep one nearby alternative per component: the closest sidewalk or indoor
+    // fragment can be disconnected while a usable street is a few metres away.
+    this.components = new Int32Array(nodes.length).fill(-1);
+    const queue = new Uint32Array(nodes.length);
+    let component = 0;
+    for (let id = 0; id < nodes.length; id++) {
+      if (this.components[id] !== -1) continue;
+      let head = 0, tail = 1;
+      queue[0] = id;
+      this.components[id] = component;
+      while (head < tail) {
+        const node = queue[head++];
+        for (const link of nodes[node].links) if (this.components[link.to] === -1) {
+          this.components[link.to] = component;
+          queue[tail++] = link.to;
+        }
+      }
+      component++;
+    }
   }
   route(from: RoadCoordinate, to: RoadCoordinate, maxSnapMeters = 100): RoadRoute | null {
     if (!valid(from) || !valid(to) || !Number.isFinite(maxSnapMeters)) return null;
     const radius = Math.max(0, Math.min(100, maxSnapMeters));
-    const start = this.snap(clean(from), radius), end = this.snap(clean(to), radius);
-    if (!start || !end) return null;
-    const startAnchors = this.anchors(start), endAnchors = this.anchors(end);
-    const scores = new Map<number, number>(), previous = new Map<number, number>();
-    const heap = new MinHeap();
-    for (const anchor of startAnchors) {
-      const g = roadDistance(start.point, this.nodes[anchor].point);
-      scores.set(anchor, g);
-      heap.push({ node: anchor, g, f: g + roadDistance(this.nodes[anchor].point, end.point) });
+    const origin = clean(from), destination = clean(to);
+    let starts = this.snapCandidates(origin, radius), ends = this.snapCandidates(destination, radius);
+    if (!starts.length || !ends.length) return null;
+    // Preserve the nearest-road route whenever that network is connected.
+    // Alternatives only recover a route that nearest-only snapping could not find.
+    if (this.components[starts[0].segment.a] === this.components[ends[0].segment.a]) {
+      starts = [starts[0]];
+      ends = [ends[0]];
+    } else {
+      const endsByComponent = new Map(ends.map(snap => [this.components[snap.segment.a], snap]));
+      const pairs = starts.flatMap(start => {
+        const end = endsByComponent.get(this.components[start.segment.a]);
+        return end ? [{ start, end }] : [];
+      }).sort((a, b) => a.start.distance + a.end.distance - b.start.distance - b.end.distance)
+        .slice(0, MAX_SNAP_CANDIDATES);
+      starts = pairs.map(pair => pair.start);
+      ends = pairs.map(pair => pair.end);
     }
-    let best = start.segment === end.segment ? roadDistance(start.point, end.point) : Infinity;
+    if (!starts.length || !ends.length) return null;
+    const scores = new Map<number, number>(), previous = new Map<number, number>();
+    const origins = new Map<number, Snap>();
+    const heap = new MinHeap();
+    for (const start of starts) for (const anchor of this.anchors(start)) {
+      const g = start.distance + roadDistance(start.point, this.nodes[anchor].point);
+      if (g >= (scores.get(anchor) ?? Infinity)) continue;
+      scores.set(anchor, g); origins.set(anchor, start);
+      heap.push({ node: anchor, g, f: g + roadDistance(this.nodes[anchor].point, destination) });
+    }
+    const targets = new Map<number, { cost: number; snap: Snap }>();
+    for (const end of ends) for (const anchor of this.anchors(end)) {
+      const cost = end.distance + roadDistance(this.nodes[anchor].point, end.point);
+      if (cost < (targets.get(anchor)?.cost ?? Infinity)) targets.set(anchor, { cost, snap: end });
+    }
+    let best = Infinity;
+    let start: Snap | null = null, end: Snap | null = null;
+    for (const candidateStart of starts) for (const candidateEnd of ends) {
+      if (candidateStart.segment !== candidateEnd.segment) continue;
+      const distance = candidateStart.distance + roadDistance(candidateStart.point, candidateEnd.point) + candidateEnd.distance;
+      if (distance < best) { best = distance; start = candidateStart; end = candidateEnd; }
+    }
     let finish = -1, visited = 0;
-    const targets = new Set(endAnchors);
     while (heap.size) {
       const current = heap.pop();
       if (current.g !== scores.get(current.node)) continue;
       if (current.f >= best) break;
       if (++visited > MAX_SEARCH_NODES) return null;
-      if (targets.has(current.node)) {
-        const total = current.g + roadDistance(this.nodes[current.node].point, end.point);
-        if (total < best) { best = total; finish = current.node; }
+      const target = targets.get(current.node);
+      if (target) {
+        const total = current.g + target.cost;
+        if (total < best) { best = total; finish = current.node; start = origins.get(current.node)!; end = target.snap; }
       }
       for (const link of this.nodes[current.node].links) {
         const g = current.g + link.distance;
         if (g >= (scores.get(link.to) ?? Infinity)) continue;
-        scores.set(link.to, g); previous.set(link.to, current.node);
-        heap.push({ node: link.to, g, f: g + roadDistance(this.nodes[link.to].point, end.point) });
+        scores.set(link.to, g); previous.set(link.to, current.node); origins.set(link.to, origins.get(current.node)!);
+        heap.push({ node: link.to, g, f: g + roadDistance(this.nodes[link.to].point, destination) });
       }
     }
-    if (!Number.isFinite(best)) return null;
+    if (!Number.isFinite(best) || !start || !end) return null;
     const points: RoadCoordinate[] = [];
     if (finish >= 0) {
       const reversed: RoadCoordinate[] = [];
@@ -202,16 +252,22 @@ export class RoadGraph {
       }
     }
     if (coordinates.length === 1) coordinates.push([...coordinates[0]]);
-    return { coordinates, distance: best };
+    return { coordinates, distance: Math.max(0, best - start.distance - end.distance) };
   }
-  private snap(point: RoadCoordinate, radius: number): Snap | null {
-    let closest: Snap | null = null;
+  private snapCandidates(point: RoadCoordinate, radius: number): Snap[] {
+    const nearest = new Map<number, { id: number; snap: Snap }>();
     for (const id of this.index.near(point, radius)) {
       const segment = this.segments[id];
       const candidate = projection(point, this.nodes[segment.a].point, this.nodes[segment.b].point);
-      if (candidate.distance <= radius && (!closest || candidate.distance < closest.distance)) closest = { ...candidate, segment };
+      const component = this.components[segment.a];
+      const existing = nearest.get(component);
+      if (candidate.distance <= radius && (!existing || candidate.distance < existing.snap.distance ||
+        (candidate.distance === existing.snap.distance && id < existing.id))) {
+        nearest.set(component, { id, snap: { ...candidate, segment } });
+      }
     }
-    return closest;
+    return [...nearest.values()].sort((a, b) => a.snap.distance - b.snap.distance || a.id - b.id)
+      .map(candidate => candidate.snap);
   }
   private anchors(snap: Snap): number[] {
     const splits = snap.segment.splits;

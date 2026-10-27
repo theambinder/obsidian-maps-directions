@@ -167,3 +167,99 @@ test('dense local fragments do not starve stitching for roads later in the input
   assert.ok(route);
   close(route.distance, 20, 0.02);
 });
+
+const metricPoint = (x: number, y: number): RoadCoordinate => {
+  const degreesPerMeter = 180 / (Math.PI * 6371008.8);
+  return [x * degreesPerMeter, y * degreesPerMeter];
+};
+const metricRoad = (points: Array<[number, number]>, properties: Record<string, unknown> = {}): RoadFeature =>
+  feature(points.map(([x, y]) => metricPoint(x, y)), properties);
+
+test('recovers a route on a nearby street when the closest fragment is disconnected', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[0, 0], [20, 0]]),
+    metricRoad([[0, 25], [500, 25]]),
+  ]);
+  const route = graph.route(metricPoint(0, 0), metricPoint(500, 25));
+  assert.ok(route);
+  assert.ok(contains(route.coordinates, metricPoint(0, 25)));
+  assert.ok(contains(route.coordinates, metricPoint(500, 25)));
+  assert.ok(!contains(route.coordinates, metricPoint(20, 0)));
+  // Access is drawn separately by the overlay and must not inflate road length.
+  close(route.distance, 500, 0.02);
+});
+
+test('many closer isolated fragments cannot crowd out the one nearby connected street', () => {
+  const features: RoadFeature[] = [];
+  for (let i = 0; i < 25; i++) {
+    features.push(metricRoad([[0, i * 2], [5, i * 2]]));
+    features.push(metricRoad([[500, i * 2], [505, i * 2]]));
+  }
+  features.push(metricRoad([[0, 80], [500, 80]]));
+  const graph = buildRoadGraph(features);
+  const route = graph.route(metricPoint(0, 0), metricPoint(500, 0));
+  assert.ok(route);
+  assert.ok(contains(route.coordinates, metricPoint(0, 80)));
+  assert.ok(contains(route.coordinates, metricPoint(500, 80)));
+  close(route.distance, 500, 0.02);
+});
+
+test('keeps an existing nearest-road route instead of taking a distant access shortcut', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[0, 0], [0, -500], [500, -500], [500, 0]]),
+    metricRoad([[0, 30], [500, 30]]),
+  ]);
+  const route = graph.route(metricPoint(0, 0), metricPoint(500, 0));
+  assert.ok(route);
+  assert.ok(contains(route.coordinates, metricPoint(0, -500)));
+  assert.ok(!contains(route.coordinates, metricPoint(0, 30)));
+  close(route.distance, 1500, 0.02);
+});
+
+test('alternative snapping never bridges a missing internal section of road', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[0, 0], [250, 0]]),
+    metricRoad([[270, 0], [600, 0]]),
+  ]);
+  assert.equal(graph.route(metricPoint(0, 0), metricPoint(600, 0)), null);
+});
+
+test('alternative snapping respects the selected radius and the hard 100 metre limit', () => {
+  const nearby = buildRoadGraph([
+    metricRoad([[0, 0], [20, 0]]),
+    metricRoad([[0, 80], [500, 80]]),
+  ]);
+  assert.equal(nearby.route(metricPoint(0, 0), metricPoint(500, 80), 50), null);
+  assert.ok(nearby.route(metricPoint(0, 0), metricPoint(500, 80), 100));
+  const outside = buildRoadGraph([
+    metricRoad([[0, 0], [20, 0]]),
+    metricRoad([[0, 101], [500, 101]]),
+  ]);
+  assert.equal(outside.route(metricPoint(0, 0), metricPoint(500, 101), 1000), null);
+});
+
+test('nearby alternatives still exclude roads without walking access', () => {
+  for (const properties of [{ class: 'motorway' }, { access: 'private' }, { foot: 'no' }]) {
+    const graph = buildRoadGraph([
+      metricRoad([[0, 0], [20, 0]]),
+      metricRoad([[0, 25], [500, 25]], properties),
+    ]);
+    assert.equal(graph.route(metricPoint(0, 0), metricPoint(500, 25)), null);
+  }
+});
+
+test('selects the shortest access plus road path among nearby connected alternatives', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[0, 0], [20, 0]]),
+    metricRoad([[500, 0], [520, 0]]),
+    metricRoad([[0, 20], [0, 300], [500, 300], [500, 20]]),
+    metricRoad([[0, -30], [500, -30]]),
+  ]);
+  const from = metricPoint(0, 0), to = metricPoint(500, 0);
+  const route = graph.route(from, to);
+  assert.ok(route);
+  assert.ok(contains(route.coordinates, metricPoint(0, -30)));
+  assert.ok(!contains(route.coordinates, metricPoint(0, 300)));
+  close(route.distance, 500, 0.02);
+  assert.deepEqual(graph.route(from, to), route);
+});

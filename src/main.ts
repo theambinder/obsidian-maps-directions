@@ -2,18 +2,25 @@ import { Notice, Plugin } from 'obsidian';
 import { MapsAdapter, type AdapterStatus } from './adapter';
 import { DirectionsOverlay } from './directions-overlay';
 import { openDirectionsDemo, openLocalRoadsDemo } from './demo';
+import { RoadRouteCache } from './route-cache';
 
 export default class MapsDirectionsPlugin extends Plugin {
   private adapter!: MapsAdapter;
   private status: AdapterStatus = { state: 'waiting', message: 'Waiting for official Maps and Bases.' };
   private reported = new Set<string>();
   private active = false;
+  private routeCache!: RoadRouteCache;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveQueue: Promise<void> = Promise.resolve();
 
-  onload(): void {
+  async onload(): Promise<void> {
     this.active = true;
+    let saved: unknown;
+    try { saved = await this.loadData(); } catch { /* An unreadable cache must not prevent Maps from opening. */ }
+    this.routeCache = new RoadRouteCache(saved, () => this.scheduleCacheSave());
     this.adapter = new MapsAdapter(
       this.app,
-      view => new DirectionsOverlay(view, error => this.reportOverlayError(error)),
+      view => new DirectionsOverlay(view, error => this.reportOverlayError(error), undefined, this.routeCache),
       status => {
         this.status = status;
         if (status.state === 'incompatible' && !this.reported.has(status.message)) {
@@ -22,7 +29,11 @@ export default class MapsDirectionsPlugin extends Plugin {
         }
       },
     );
-    this.register(() => { this.active = false; this.adapter.stop(); });
+    this.register(() => {
+      this.active = false;
+      this.adapter.stop();
+      if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; this.saveCache(); }
+    });
     this.app.workspace.onLayoutReady(() => { if (this.active) this.adapter.start(); });
 
     this.addCommand({
@@ -58,6 +69,18 @@ export default class MapsDirectionsPlugin extends Plugin {
         const statuses = this.adapter.getRoutingStatuses();
         new Notice(`Maps Directions: ${statuses.length ? statuses.join('\n\n') : 'Open a Maps view to check local routing.'}`, 15000);
       },
+    });
+  }
+
+  private scheduleCacheSave(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => { this.saveTimer = null; this.saveCache(); }, 800);
+  }
+
+  private saveCache(): void {
+    const data = this.routeCache.serialize();
+    this.saveQueue = this.saveQueue.catch(() => {}).then(() => this.saveData(data)).catch(error => {
+      console.error('Maps Directions: could not save local route cache', error);
     });
   }
 

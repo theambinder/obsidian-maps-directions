@@ -1,5 +1,6 @@
-import type { MapsViewLike, OverlayLike } from './contracts';
+import type { MapLike, MapsViewLike, OverlayLike } from './contracts';
 import { directionSettings } from './settings';
+import type { BackgroundMapFactory } from './background-roads';
 
 export interface AdapterStatus {
   state: 'ready' | 'waiting' | 'incompatible';
@@ -368,4 +369,13 @@ export class MapsAdapter {
     this.lastStatus = key;
     try { this.onStatus({ state, message }); } catch { /* Status UI cannot affect Maps. */ }
   }
+}
+
+/** Reuse the installed renderer only when its public map operations are available. */
+export function getBackgroundMapFactory(map: MapLike): BackgroundMapFactory | null {
+  const constructor = map.constructor;
+  if (typeof constructor !== 'function' || constructor === Object) return null;
+  const prototype = constructor.prototype as Record<string, unknown> | undefined;
+  if (!prototype || !['on', 'off', 'jumpTo', 'remove', 'getStyle', 'getZoom', 'querySourceFeatures'].every(key => typeof prototype[key] === 'function')) return null;
+  return options => Reflect.construct(constructor, [options]);
 }

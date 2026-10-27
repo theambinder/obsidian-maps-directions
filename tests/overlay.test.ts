@@ -6,6 +6,8 @@ import type { RoadRoute, RoutingResult } from '../src/routing-protocol';
 import type { RoadFeature } from '../src/road-graph';
 import type { FeatureCollection, GeoJSONSourceLike, MapLike, MapsMarker, MapsViewLike } from '../src/contracts';
 import { KEYS } from '../src/settings';
+import { RoadRouteCache } from '../src/route-cache';
+import type { BackgroundMapFactory, BackgroundRoadPreparationOptions, RoadPreparationResult, prepareBackgroundRoads } from '../src/background-roads';
 
 class FakeMap implements MapLike {
   sources = new Map<string, GeoJSONSourceLike & { data?: FeatureCollection }>([['maps-markers', { setData() {} }]]);
@@ -58,7 +60,7 @@ class FakeMap implements MapLike {
   }
 }
 
-function setup(enabled = true, client?: RoutingClient) {
+function setup(enabled = true, client?: RoutingClient, cache?: RoadRouteCache, preparation?: ConstructorParameters<typeof DirectionsOverlay>[4]) {
   const map = new FakeMap();
   const settings: Record<string, unknown> = { [KEYS.enabled]: enabled, [KEYS.sequence]: 'sequence' };
   const view: MapsViewLike = {
@@ -74,7 +76,7 @@ function setup(enabled = true, client?: RoutingClient) {
     register() {},
   };
   const errors: unknown[] = [];
-  const overlay = new DirectionsOverlay(view, error => errors.push(error), client);
+  const overlay = new DirectionsOverlay(view, error => errors.push(error), client, cache, preparation);
   return { map, settings, view, errors, overlay };
 }
 
@@ -324,13 +326,14 @@ test('local road results are drawn once and style changes do not repeat the sear
 
 class DeferredRoutingClient implements RoutingClient {
   calls: Array<{
+    snapshot: Parameters<RoutingClient['route']>[0];
     legs: Parameters<RoutingClient['route']>[1];
     resolve: (result: RoutingResult) => void;
     reject: (error: Error) => void;
   }> = [];
   cancellations = 0;
-  route(_snapshot: Parameters<RoutingClient['route']>[0], legs: Parameters<RoutingClient['route']>[1]): Promise<RoutingResult> {
-    return new Promise((resolve, reject) => { this.calls.push({ legs, resolve, reject }); });
+  route(snapshot: Parameters<RoutingClient['route']>[0], legs: Parameters<RoutingClient['route']>[1]): Promise<RoutingResult> {
+    return new Promise((resolve, reject) => { this.calls.push({ snapshot, legs, resolve, reject }); });
   }
   cancel(): void { this.cancellations++; }
   finish(index: number, routes: Array<RoadRoute | null>): void {
@@ -369,6 +372,235 @@ const roadAB: RoadRoute = { coordinates: [[1, 1], [1.5, 1], [2, 2]], distance: 1
 const roadBC: RoadRoute = { coordinates: [[2, 2], [2.5, 2], [3, 3]], distance: 110 };
 const waitForRouting = () => new Promise(resolve => setTimeout(resolve, 180));
 const flushRouting = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+class OverlayTestDocument {
+  createElement(tag: string): OverlayTestElement { return new OverlayTestElement(tag, this); }
+}
+class OverlayTestElement {
+  children: OverlayTestElement[] = [];
+  parent: OverlayTestElement | null = null;
+  style: Record<string, string> = {};
+  attributes: Record<string, string> = {};
+  listeners = new Map<string, (event: { stopPropagation(): void }) => void>();
+  className = ''; textContent = ''; title = ''; hidden = false; disabled = false; open = false; type = '';
+  constructor(readonly tag: string, readonly ownerDocument: OverlayTestDocument) {}
+  setAttribute(key: string, value: string): void { this.attributes[key] = value; }
+  append(...children: OverlayTestElement[]): void {
+    for (const child of children) { child.parent = this; this.children.push(child); }
+  }
+  replaceChildren(...children: OverlayTestElement[]): void {
+    this.children.forEach(child => { child.parent = null; }); this.children = []; this.append(...children);
+  }
+  remove(): void {
+    if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
+    this.parent = null;
+  }
+  addEventListener(name: string, listener: (event: { stopPropagation(): void }) => void): void { this.listeners.set(name, listener); }
+  click(): void { this.listeners.get('click')?.({ stopPropagation() {} }); }
+}
+
+class DeferredBackgroundPreparation {
+  readonly factory: BackgroundMapFactory = () => { throw Error('The fake runner must not construct a map.'); };
+  readonly calls: Array<{
+    original: Parameters<typeof prepareBackgroundRoads>[0];
+    centers: Parameters<typeof prepareBackgroundRoads>[1];
+    options: BackgroundRoadPreparationOptions;
+    resolve: (result: RoadPreparationResult) => void;
+  }> = [];
+  readonly run: typeof prepareBackgroundRoads = (original, centers, options) => new Promise(resolve => {
+    this.calls.push({ original, centers, options, resolve });
+  });
+  readonly services = { factory: () => this.factory, run: this.run };
+  snapshot(index: number, features: RoadFeature[]): Promise<unknown> {
+    const call = this.calls[index];
+    return Promise.resolve(call.options.onSnapshot({ key: `prepared-${index}`, features, sources: ['osm'], state: 'ready' }, call.options.signal!));
+  }
+  progress(index: number, completed: number): void {
+    const call = this.calls[index];
+    call.options.onProgress?.({ completed, total: call.centers.length, ready: completed });
+  }
+  finish(index: number, overrides: Partial<RoadPreparationResult> = {}): void {
+    const call = this.calls[index];
+    call.resolve({ completed: call.centers.length, total: call.centers.length, ready: call.centers.length, timedOut: false, ...overrides });
+  }
+}
+
+function preparationSetup() {
+  const background = new DeferredBackgroundPreparation();
+  const client = new DeferredRoutingClient();
+  const cache = new RoadRouteCache();
+  const subject = setup(true, client, cache, background.services);
+  const roads = attachRoads(subject.map);
+  roads.zoom = 6; // The current overview does not expose detailed road geometry.
+  const host = new OverlayTestDocument().createElement('div');
+  const cameraMoves: unknown[] = [];
+  Object.assign(subject.map, {
+    getContainer: () => host as unknown as HTMLElement,
+    getCenter: () => ({ lng: 1, lat: 1 }),
+    jumpTo: (...args: unknown[]) => cameraMoves.push(args),
+    flyTo: (...args: unknown[]) => cameraMoves.push(args),
+    fitBounds: (...args: unknown[]) => cameraMoves.push(args),
+  });
+  subject.settings[KEYS.routeMode] = 'local';
+  return { ...subject, background, client, cache, roads, host, cameraMoves };
+}
+
+function preparationControl(host: OverlayTestElement) {
+  const root = host.children.find(child => child.className === 'obsidian-maps-directions-route-status');
+  assert.ok(root, 'Expected the on-map road preparation control.');
+  return { root, button: root.children[0].children[1], count: root.children[0].children[0], progress: root.children[1] };
+}
+
+test('background road preparation requires the explicit map action and never moves the visible camera', async () => {
+  const { overlay, map, background, client, host, cameraMoves, roads, errors } = preparationSetup();
+  overlay.update();
+  for (let index = 0; index < 5; index++) { map.emit('moveend'); map.emit('idle'); }
+  await waitForRouting();
+  assert.equal(background.calls.length, 0);
+  assert.equal(client.calls.length, 0);
+  const control = preparationControl(host);
+  assert.equal(control.button.textContent, 'Prepare road routes');
+  control.button.click();
+  assert.equal(background.calls.length, 1);
+  assert.equal(background.calls[0].original, map);
+  assert.ok(background.calls[0].centers.length > 0 && background.calls[0].centers.length <= 64);
+  assert.equal(control.button.textContent, 'Cancel');
+  background.progress(0, 1);
+  assert.equal(control.progress.textContent, `Preparing roads: 1/${background.calls[0].centers.length} areas`);
+  background.finish(0);
+  await flushRouting();
+  assert.equal(control.button.textContent, 'Prepare road routes');
+  assert.match(control.progress.textContent, /Preparation complete/);
+  assert.deepEqual(cameraMoves, []);
+  assert.equal(roads.zoom, 6);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+  assert.equal(host.children.length, 0);
+});
+
+test('prepared road snapshots find paths, refresh the live map, and persist the geometry', async () => {
+  const { overlay, map, background, client, cache, host, cameraMoves, errors } = preparationSetup();
+  overlay.update();
+  const preparation = overlay.prepareRoadRoutes();
+  const snapshot = background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: roadAB.coordinates }, properties: { class: 'minor' } }]);
+  assert.equal(client.calls.length, 1);
+  assert.deepEqual(client.calls[0].legs, [{ from: [1, 1], to: [2, 2] }]);
+  client.finish(0, [roadAB]);
+  assert.equal(await snapshot, false); // All requested connections are found; stop loading areas.
+  assert.deepEqual(mainConnections(map)[0].geometry.coordinates, roadAB.coordinates);
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'road');
+  assert.equal(cache.serialize().routes.length, 1);
+  assert.equal(preparationControl(host).count.textContent, 'Road routes: 1/1');
+  background.finish(0);
+  await preparation;
+  assert.equal(preparationControl(host).button.hidden, true);
+  assert.match(preparationControl(host).progress.textContent, /1\/1 follow roads/);
+  assert.deepEqual(cameraMoves, []);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+test('preparation without any loaded road areas explains unavailable data instead of claiming disconnected paths', async () => {
+  const { overlay, map, background, client, cache, host, errors } = preparationSetup();
+  overlay.update();
+  const preparation = overlay.prepareRoadRoutes();
+  background.finish(0, { ready: 0 });
+  await preparation;
+  const control = preparationControl(host);
+  const diagnostic = control.root.children[2].children[2].textContent;
+  assert.match(control.progress.textContent, /no detailed road|unavailable/i);
+  assert.match(diagnostic, /unavailable|no detailed road/i);
+  assert.doesNotMatch(diagnostic, /no connected walking path/i);
+  assert.equal(control.button.textContent, 'Prepare road routes');
+  assert.equal(control.button.hidden, false);
+  assert.equal(client.calls.length, 0);
+  assert.equal(cache.serialize().routes.length, 0);
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'fallback');
+  assert.deepEqual(errors, []);
+  overlay.destroy();
+});
+
+test('Cancel aborts asynchronous preparation and late worker results cannot save a stale path', async () => {
+  const { overlay, map, background, client, cache, host, errors } = preparationSetup();
+  overlay.update();
+  const preparation = overlay.prepareRoadRoutes();
+  background.progress(0, 1);
+  const snapshot = background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: roadAB.coordinates }, properties: { class: 'minor' } }]);
+  const signal = background.calls[0].options.signal!;
+  const cancellations = client.cancellations;
+  const control = preparationControl(host);
+  assert.equal(control.button.textContent, 'Cancel');
+  control.button.click();
+  assert.equal(signal.aborted, true);
+  assert.ok(client.cancellations > cancellations);
+  assert.match(control.progress.textContent, /Preparation stopped/);
+  client.finish(0, [roadAB]);
+  assert.equal(await snapshot, false);
+  background.progress(0, 2); // A late notification must not resurrect the progress UI.
+  background.finish(0);
+  await preparation;
+  assert.equal(cache.serialize().routes.length, 0);
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'fallback');
+  assert.equal(control.button.textContent, 'Prepare road routes');
+  assert.match(control.progress.textContent, /Preparation stopped/);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+for (const scenario of ['marker edit', 'disable', 'style reload', 'unload'] as const) {
+  test(`${scenario} aborts pending background preparation and rejects its later snapshots and paths`, async () => {
+    const { overlay, map, view, settings, background, client, cache, host, errors } = preparationSetup();
+    overlay.update();
+    const preparation = overlay.prepareRoadRoutes();
+    const snapshot = background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: roadAB.coordinates }, properties: { class: 'minor' } }]);
+    const signal = background.calls[0].options.signal!;
+    if (scenario === 'marker edit') { view.markerManager.markers[1].coordinates = [3, 3]; overlay.update(); }
+    else if (scenario === 'disable') { settings[KEYS.enabled] = false; overlay.update(); }
+    else if (scenario === 'style reload') map.reloadStyle();
+    else overlay.destroy();
+    assert.equal(signal.aborted, true);
+    client.finish(0, [roadAB]);
+    assert.equal(await snapshot, false);
+    const calls = client.calls.length;
+    assert.equal(await background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: roadAB.coordinates }, properties: { class: 'minor' } }]), false);
+    assert.equal(client.calls.length, calls);
+    background.progress(0, 1);
+    background.finish(0);
+    await preparation;
+    assert.equal(cache.serialize().routes.length, 0);
+    if (scenario === 'marker edit' || scenario === 'style reload') assert.equal(mainConnections(map)[0].properties.connectionKind, 'fallback');
+    else { assert.equal(map.sources.size, 1); assert.equal(host.children.length, 0); }
+    assert.deepEqual(errors, []);
+    assertOriginalResources(map);
+    overlay.destroy();
+  });
+}
+
+test('color changes keep background preparation alive and new paths use the current color', async () => {
+  const { overlay, map, settings, background, client, cache, errors } = preparationSetup();
+  overlay.update();
+  const preparation = overlay.prepareRoadRoutes();
+  const snapshot = background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: roadAB.coordinates }, properties: { class: 'minor' } }]);
+  settings[KEYS.color] = '#2583e8';
+  settings[KEYS.width] = 5;
+  overlay.update();
+  assert.equal(background.calls[0].options.signal!.aborted, false);
+  assert.equal(background.calls.length, 1);
+  assert.equal(client.calls.length, 1);
+  client.finish(0, [roadAB]);
+  assert.equal(await snapshot, false);
+  assert.equal(mainConnections(map)[0].properties.lineColor, '#2583e8');
+  assertMatchingArrowImages(map);
+  background.finish(0);
+  await preparation;
+  assert.equal(cache.serialize().routes.length, 1);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
 
 test('found road geometry survives zooming out and panning into areas without detailed roads', async () => {
   const client = new DeferredRoutingClient();
@@ -569,6 +801,133 @@ function assertMatchingArrowImages(map: FakeMap): void {
     assert.deepEqual([...image.data.slice(opaquePixel, opaquePixel + 3)], channels);
   }
 }
+
+test('a new map view restores saved geometry without detailed roads or a worker and uses current styling', async () => {
+  let changes = 0;
+  const cache = new RoadRouteCache(undefined, () => changes++);
+  const firstClient = new DeferredRoutingClient();
+  const first = setup(true, firstClient, cache);
+  attachRoads(first.map);
+  first.settings[KEYS.routeMode] = 'local';
+  first.overlay.update();
+  await waitForRouting();
+  firstClient.finish(0, [roadAB]);
+  await flushRouting();
+  assert.equal(changes, 1);
+  assert.equal(cache.serialize().routes.length, 1);
+  first.overlay.destroy();
+
+  const restored = new RoadRouteCache(JSON.parse(JSON.stringify(cache.serialize())));
+  const nextClient = new DeferredRoutingClient();
+  const next = setup(true, nextClient, restored); // No road query or style API is exposed.
+  next.settings[KEYS.routeMode] = 'local';
+  next.settings[KEYS.color] = '#2583e8';
+  next.overlay.update();
+  assert.equal(mainConnections(next.map)[0].properties.connectionKind, 'road');
+  assert.deepEqual(mainConnections(next.map)[0].geometry.coordinates, roadAB.coordinates);
+  assert.equal(mainConnections(next.map)[0].properties.lineColor, '#2583e8');
+  assertMatchingArrowImages(next.map);
+  assert.match(next.overlay.getRoutingStatus(), /saved paths.*reopen/i);
+  await waitForRouting();
+  assert.equal(nextClient.calls.length, 0);
+  assert.deepEqual(next.errors, []);
+  assertOriginalResources(first.map);
+  assertOriginalResources(next.map);
+  next.overlay.destroy();
+});
+
+test('saved paths match ordered endpoints exactly after edits and never attach to a reversed connection', async () => {
+  const cache = new RoadRouteCache();
+  cache.set(JSON.stringify([[1, 1], [2, 2]]), roadAB);
+  cache.set(JSON.stringify([[2, 2], [3, 3]]), roadBC);
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, view, errors } = setup(true, client, cache);
+  view.markerManager.markers.push(extraMarker('third.md', 3, 2));
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['road', 'road']);
+
+  view.markerManager.markers[0].coordinates = [0.5, 0.5];
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['fallback', 'road']);
+  assert.deepEqual(mainConnections(map)[0].geometry.coordinates, [[0.5, 0.5], [2, 2]]);
+  assert.deepEqual(mainConnections(map)[1].geometry.coordinates, roadBC.coordinates);
+
+  view.markerManager.markers.forEach((marker, index) => {
+    marker.entry.getValue = () => ({ toString: () => String(2 - index) });
+  });
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['fallback', 'fallback']);
+  assert.deepEqual(mainConnections(map)[0].geometry.coordinates, [[3, 3], [2, 2]]);
+  await waitForRouting();
+  assert.equal(client.calls.length, 0);
+  assert.equal(cache.serialize().routes.length, 2);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
+
+test('a worker result arriving after the view is destroyed cannot enter the persistent cache', async () => {
+  let changes = 0;
+  const cache = new RoadRouteCache(undefined, () => changes++);
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, errors } = setup(true, client, cache);
+  attachRoads(map);
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await waitForRouting();
+  assert.equal(client.calls.length, 1);
+  overlay.destroy();
+  const mutations = map.mutations.length;
+  client.finish(0, [roadAB]);
+  await flushRouting();
+  assert.equal(changes, 0);
+  assert.equal(cache.serialize().routes.length, 0);
+  assert.equal(map.mutations.length, mutations);
+  assert.equal(map.sources.size, 1);
+  assert.ok([...map.listeners.values()].every(handlers => handlers.size === 0));
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+});
+
+test('panning to new detailed roads gives the next search both old and new area geometry', async () => {
+  const client = new DeferredRoutingClient();
+  const { overlay, map, settings, errors } = setup(true, client);
+  const loaded = attachRoads(map);
+  const firstArea: RoadFeature = { geometry: { type: 'LineString', coordinates: [[1, 1], [1.5, 1]] }, properties: { class: 'minor' } };
+  const secondArea: RoadFeature = { geometry: { type: 'LineString', coordinates: [[1.5, 1], [2, 2]] }, properties: { class: 'minor' } };
+  loaded.roads = [firstArea];
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  await waitForRouting();
+  assert.equal(client.calls[0].snapshot.features.length, 1);
+  client.finish(0, [null]);
+  await flushRouting();
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'fallback');
+
+  loaded.roads = [secondArea]; // The first area's tile has left the official map.
+  map.emit('moveend');
+  map.emit('sourcedata', { sourceId: 'osm' });
+  map.emit('idle');
+  await waitForRouting();
+  assert.equal(client.calls.length, 2);
+  const captured = client.calls[1].snapshot;
+  assert.equal(captured.features.length, 2);
+  assert.ok(captured.features.some(feature => JSON.stringify(feature.geometry) === JSON.stringify(firstArea.geometry)));
+  assert.ok(captured.features.some(feature => JSON.stringify(feature.geometry) === JSON.stringify(secondArea.geometry)));
+  assert.notEqual(captured.key, client.calls[0].snapshot.key);
+  loaded.zoom = 6;
+  loaded.roads = [];
+  map.emit('moveend');
+  map.emit('idle');
+  client.finish(1, [roadAB]);
+  await flushRouting();
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'road');
+  assert.deepEqual(mainConnections(map)[0].geometry.coordinates, roadAB.coordinates);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
+});
 
 test('random groups use different consistent colors for solid lines, fallback lines and their arrow bitmaps', () => {
   const { overlay, map, settings, view, errors } = setup();

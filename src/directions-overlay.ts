@@ -6,6 +6,18 @@ import type { RoadRoute, RoutingResult } from './routing-protocol';
 import { readOptions } from './settings';
 import { colorDirections } from './route-colors';
 import { createLineColorResolver } from './browser-colors';
+import { RouteLegend } from './route-legend';
+import { RouteStatusControl, type RoadPreparationProgress } from './route-status-control';
+import { RoadRouteCache } from './route-cache';
+import { DetailedRoadMemory } from './detailed-road-memory';
+import { prepareBackgroundRoads, type BackgroundMapFactory } from './background-roads';
+import { getBackgroundMapFactory } from './adapter';
+import { planRoadPreparation } from './road-preparation-targets';
+
+interface PreparationServices {
+  factory?: (map: MapLike) => BackgroundMapFactory | null;
+  run?: typeof prepareBackgroundRoads;
+}
 
 export const RESOURCE_PREFIX = 'obsidian-maps-directions-';
 const sessionId = Date.now().toString(36);
@@ -67,6 +79,12 @@ export class DirectionsOverlay implements OverlayLike {
   private pendingInputKey = '';
   private readonly retainedRoutes = new Map<string, RoadRoute>();
   private routingStatus = 'Straight-line connections.';
+  private readonly legend = new RouteLegend();
+  private readonly statusControl = new RouteStatusControl();
+  private readonly detailedRoads = new DetailedRoadMemory();
+  private preparationController: AbortController | null = null;
+  private preparationInput = '';
+  private preparationProgress: RoadPreparationProgress | undefined;
   private readonly onMapEvent = (): void => this.update();
   private readonly onRoadsChanged = (...args: unknown[]): void => {
     const event = args[0] as { sourceId?: string } | undefined;
@@ -74,12 +92,14 @@ export class DirectionsOverlay implements OverlayLike {
     if (event?.sourceId && this.roads && !this.roads.sources.includes(event.sourceId)) return;
     this.roadsDirty = true;
   };
-  private readonly onStyleLoaded = (): void => { this.clearRouting(); this.update(); };
+  private readonly onStyleLoaded = (): void => { this.detailedRoads.clear(); this.clearRouting(); this.update(); };
 
   constructor(
     private readonly view: MapsViewLike,
     private readonly onError: (error: unknown) => void,
     private readonly routingClient: RoutingClient = new LocalRoutingClient(),
+    private readonly routeCache: RoadRouteCache = new RoadRouteCache(),
+    private readonly preparationServices: PreparationServices = {},
   ) {}
 
   getRoutingStatus(): string { return this.routingStatus; }
@@ -118,6 +138,9 @@ export class DirectionsOverlay implements OverlayLike {
 
       // Color decoration stays outside routing identity: color edits never rerun road search.
       const colored = colorDirections(this.connectionData(map, directData, options.routeMode), this.view.markerManager.markers, { ...options, normalizeColor: this.normalizeColor });
+      const host = map.getContainer?.() ?? null;
+      this.legend.update(host, colored, !!options.groupProperty);
+      this.statusControl.update(host, colored, options.routeMode === 'local', this.routingStatus, this.roads?.state !== 'unsupported' && this.preparationFactory(map) ? () => { void this.prepareRoadRoutes(); } : null, this.preparationProgress, () => { this.cancelPreparation(); this.update(); });
       const data: FeatureCollection = { type: 'FeatureCollection', features: colored.features.map(feature => ({
         ...feature, properties: { ...feature.properties, arrowImage: `${this.imageId}-${String(feature.properties.lineColor).slice(1)}` },
       })) };
@@ -225,27 +248,37 @@ export class DirectionsOverlay implements OverlayLike {
     // A route belongs to its endpoints, not to the camera or the current tile set.
     // Cache geometry only; all note properties and access lines use current markers.
     const keys = direct.features.map(routeKey);
+    for (const key of keys.slice(0, 200)) {
+      if (this.retainedRoutes.has(key)) continue;
+      const cached = this.routeCache.get(key);
+      if (cached) this.retainedRoutes.set(key, cached);
+    }
     const currentKeys = new Set(keys.slice(0, 200));
     for (const key of this.retainedRoutes.keys()) if (!currentKeys.has(key)) this.retainedRoutes.delete(key);
     const missing = keys.slice(0, 200).flatMap((key, index) => this.retainedRoutes.has(key) ? [] : [index]);
     const inputKey = JSON.stringify(direct);
+    if (this.preparationController && this.preparationInput !== inputKey) this.cancelPreparation();
     const retainedData = (): FeatureCollection => applyRoadRoutes(direct, {
       id: 0, routes: keys.map(key => this.retainedRoutes.get(key) ?? null),
       stats: { nodes: 0, edges: 0, truncated: false },
     });
     const retainedCount = keys.filter(key => this.retainedRoutes.has(key)).length;
+    if (this.preparationController) {
+      this.routedData = retainedData();
+      return this.routedData;
+    }
     if (!missing.length) {
       if (this.pendingInputKey) this.stopRoutingJob();
       const key = `retained:${inputKey}`;
       if (this.routingKey !== key || !this.routedData) this.routedData = retainedData();
       this.routingKey = key;
-      this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads; ${direct.features.length - retainedCount} use dashed straight fallback. Found paths stay visible at every zoom level while this view is open.`;
+      this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads; ${direct.features.length - retainedCount} use dashed straight fallback. Found paths stay visible at every zoom level. Saved paths remain after reopening.`;
       return this.routedData!;
     }
     // A camera change must not cancel a search already using detailed captured roads.
     if (this.pendingInputKey === inputKey && this.routedData) return this.routedData;
     if (this.roadsDirty || !this.roads) {
-      try { this.roads = collectLocalRoads(map); }
+      try { this.roads = this.detailedRoads.merge(collectLocalRoads(map)); }
       catch { this.roads = { key: 'unsupported', state: 'unsupported', sources: [], features: [] }; }
       this.roadsDirty = false;
     }
@@ -256,10 +289,10 @@ export class DirectionsOverlay implements OverlayLike {
     this.routingKey = key;
     this.routedData = retainedData();
     const reasons = {
-      zoom: 'Zoom in to level 14 or closer to load detailed roads.',
+      zoom: 'Use Prepare road routes to load detailed roads in the background.',
       unsupported: 'This background does not expose a supported vector road layer.',
-      empty: 'No road lines are loaded in this area.',
-      limited: 'This area has too much road data. Zoom in to a smaller area.',
+      empty: 'No road lines are loaded here. Prepare road routes can load more detail.',
+      limited: 'This area exceeds the local road data limit. Prepare road routes searches bounded areas.',
       ready: 'Finding paths on loaded roads…',
     };
     this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads. ${reasons[roads.state]} Unresolved connections are shown dashed.`;
@@ -278,19 +311,115 @@ export class DirectionsOverlay implements OverlayLike {
         this.pendingInputKey = '';
         missing.forEach((index, routeIndex) => {
           const route = result.routes[routeIndex];
-          if (isUsableRoute(route)) this.retainedRoutes.set(keys[index], route);
+          if (isUsableRoute(route)) {
+            this.retainedRoutes.set(keys[index], route);
+            this.routeCache.set(keys[index], route);
+          }
         });
         this.routedData = retainedData();
         const routed = this.routedData.features.filter(feature => feature.properties.connectionKind === 'road').length;
-        this.routingStatus = `Local roads: ${routed}/${direct.features.length} connections follow roads; ${direct.features.length - routed} use dashed straight fallback. ${result.stats.nodes} road nodes. Found paths stay visible when zooming out.${result.stats.truncated ? ' Road data limit reached.' : ''}`;
+        this.routingStatus = `Local roads: ${routed}/${direct.features.length} connections follow roads; ${direct.features.length - routed} use dashed straight fallback. ${result.stats.nodes} road nodes. Found paths are saved and stay visible when zooming out.${result.stats.truncated ? ' Road data limit reached.' : ''}`;
         this.update();
       }, () => {
         if (this.destroyed || generation !== this.routingGeneration || this.map !== map) return;
         this.pendingInputKey = '';
-        this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads. Search could not finish; found paths are kept and unresolved connections are shown dashed. Try a smaller area.`;
+        this.routingStatus = `Local roads: ${retainedCount}/${direct.features.length} connections follow roads. Search could not finish; found paths are kept and unresolved connections are shown dashed. Try Prepare road routes again.`;
+        this.update();
       });
     }, 150);
     return this.routedData;
+  }
+
+  private preparationFactory(map: MapLike): BackgroundMapFactory | null {
+    return this.preparationServices.factory ? this.preparationServices.factory(map) : getBackgroundMapFactory(map);
+  }
+
+  private cancelPreparation(): void {
+    const controller = this.preparationController;
+    if (!controller) return;
+    this.preparationController = null;
+    this.preparationInput = '';
+    controller.abort();
+    this.stopRoutingJob();
+    this.preparationProgress = { ...this.preparationProgress!, running: false, message: 'Preparation stopped. Found paths are saved.' };
+  }
+
+  /** Explicit user action. The visible map never moves during preparation. */
+  async prepareRoadRoutes(): Promise<void> {
+    if (this.destroyed || this.suspended || this.preparationController) return;
+    const options = readOptions(this.view.config), map = this.map;
+    if (!map || !options.enabled || options.routeMode !== 'local' || !options.sequenceProperty) return;
+    const factory = this.preparationFactory(map);
+    if (!factory) return;
+    const direct = buildDirections(this.view.markerManager.markers, options.sequenceProperty, options.groupProperty);
+    const keys = direct.features.map(routeKey);
+    const missing = direct.features.flatMap((feature, index) => index < 200 && !this.retainedRoutes.has(keys[index]) ? [{ ...feature, properties: { ...feature.properties, connectionKind: 'fallback' } }] : []);
+    const center = map.getCenter?.();
+    const plan = planRoadPreparation({ type: 'FeatureCollection', features: missing }, center ? [center.lng, center.lat] : null);
+    if (!plan.centers.length) return;
+    this.stopRoutingJob();
+    const controller = new AbortController();
+    this.preparationController = controller;
+    this.preparationInput = JSON.stringify(direct);
+    this.preparationProgress = { running: true, completed: 0, total: plan.centers.length };
+    this.routingStatus = 'Preparing detailed roads in the background. The visible map stays in place.';
+    this.update();
+    const active = (): boolean => !this.destroyed && !controller.signal.aborted && this.preparationController === controller && this.map === map;
+    const stopWorker = (): void => this.routingClient.cancel();
+    try {
+      const result = await (this.preparationServices.run ?? prepareBackgroundRoads)(map, plan.centers, {
+        factory, signal: controller.signal,
+        onProgress: progress => {
+          if (!active()) return;
+          this.preparationProgress = { running: true, completed: progress.completed, total: progress.total };
+          this.update();
+        },
+        onSnapshot: async (snapshot, signal) => {
+          if (!active()) return false;
+          const roads = this.detailedRoads.merge(snapshot);
+          if (roads.state !== 'ready') return;
+          const indexes = keys.flatMap((key, index) => index < 200 && !this.retainedRoutes.has(key) ? [index] : []);
+          if (!indexes.length) return false;
+          this.roads = roads;
+          signal.addEventListener('abort', stopWorker, { once: true });
+          let result: RoutingResult;
+          try {
+            result = await this.routingClient.route(roads, indexes.map(index => {
+              const [from, to] = direct.features[index].geometry.coordinates;
+              return { from: [normalizeLongitude(from[0]), from[1]], to: [normalizeLongitude(to[0]), to[1]] };
+            }));
+          } finally { signal.removeEventListener('abort', stopWorker); }
+          if (!active()) return false;
+          indexes.forEach((index, routeIndex) => {
+            const route = result.routes[routeIndex];
+            if (isUsableRoute(route)) { this.retainedRoutes.set(keys[index], route); this.routeCache.set(keys[index], route); }
+          });
+          this.routingKey = JSON.stringify([roads.key, direct]);
+          this.routingStatus = 'Preparing detailed roads in the background. Found paths are saved.';
+          this.update();
+          return keys.slice(0, 200).some(key => !this.retainedRoutes.has(key));
+        },
+      });
+      if (!active()) return;
+      const count = keys.filter(key => this.retainedRoutes.has(key)).length;
+      const remaining = direct.features.length - count;
+      const noData = result.ready === 0 && remaining > 0;
+      this.preparationProgress = { running: false, completed: result.completed, total: result.total,
+        message: `${noData ? 'No detailed road data loaded.' : result.timedOut ? 'Time limit reached.' : 'Preparation complete.'} ${count}/${direct.features.length} follow roads.${remaining ? ` ${remaining} remain dashed.` : ''}${remaining && plan.limited ? ' Area limit reached.' : ''}` };
+      this.routingStatus = noData ? 'Detailed roads were unavailable. Check the map background and network connection, then retry. Saved paths remain available.' :
+        `Local roads: ${count}/${direct.features.length} connections follow roads. Saved paths remain after reopening.${remaining ? ' Remaining connections could not be matched to a walking path in the available data; missing detail, ferry and flight legs can remain dashed.' : ''}${plan.skippedLongLegs ? ' Long-distance connections received endpoint detail only.' : ''}`;
+    } catch (error) {
+      if (!active()) return;
+      this.preparationProgress = { ...this.preparationProgress!, running: false, message: 'Preparation could not finish. Found paths are saved.' };
+      this.routingStatus = 'Background road preparation could not finish. Check the map background and network connection. Saved paths remain available.';
+      console.warn('Maps Directions: background preparation could not finish', error);
+    } finally {
+      if (this.preparationController === controller) {
+        this.preparationController = null;
+        this.preparationInput = '';
+        this.update();
+      }
+    }
   }
 
   private stopRoutingJob(): void {
@@ -302,6 +431,7 @@ export class DirectionsOverlay implements OverlayLike {
   }
 
   private clearRouting(): void {
+    this.cancelPreparation();
     this.stopRoutingJob();
     this.routingKey = '';
     this.routedData = null;
@@ -314,6 +444,9 @@ export class DirectionsOverlay implements OverlayLike {
     this.map = null;
     this.dataSignature = null;
     this.styleSignature = null;
+    this.legend.destroy();
+    this.statusControl.destroy();
+    this.detailedRoads.clear();
     const imageIds = [...this.arrowImages.values()];
     this.arrowImages.clear();
     this.clearRouting();

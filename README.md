@@ -2,8 +2,8 @@
 
 Add ordered lines and direction arrows to the **Map** layout supplied by the
 official [Maps plugin](https://github.com/obsidianmd/obsidian-maps) for Obsidian Bases.
-Choose direct connections or experimental paths along roads already loaded by Maps,
-with one line color, automatic colors per route, or colors from a note property.
+Choose direct connections or experimental walking paths along roads, with one-click
+road preparation, automatic colors per route, or colors from a note property.
 
 This is a companion plugin. Official Maps continues to render every marker,
 icon, marker color, popup and map background. Its existing **Display**, **Markers**
@@ -21,7 +21,7 @@ layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.3.0 is a testing prerelease, not an Obsidian directory submission.
+Version 0.4.0 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -31,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.3.0.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.4.0.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -45,6 +45,10 @@ The installation ZIP is `dist/maps-directions-0.3.0.zip`. You can also copy
 6. Choose **Line color mode**: **Single color**, **Random by route** or **Color property**.
    The matching **Line color** or **Color property** control appears below it.
 7. Adjust line width, opacity and arrow size in the same **Directions** group.
+8. In local mode, click **Prepare road routes** if connections remain dashed.
+   Road detail loads in the background, with progress and a **Cancel** button.
+   The visible map stays in place. **Road routes: N/total** shows the result, and
+   the **Routes** legend identifies each group and its line color.
 
 Connections are disabled by default for existing views. **Straight line** remains
 the default route mode, including for bases created by version 0.1.0. Settings are
@@ -130,37 +134,81 @@ road paths, dashed fallback/access segments and direction arrows share the route
 color. Changing color settings updates their appearance without calculating the
 road path again. Original Maps marker colors remain controlled by Maps.
 
+## Map legend and routing progress
+
+When **Separate routes by** is selected, a collapsible **Routes** legend appears
+at the bottom-left of the map. It lists each visible route group with the actual
+color of its line, in all three color modes. A blank group is labeled
+**Ungrouped**. The legend scrolls when there are many groups and disappears when
+there are no connections or no grouping property.
+
+In **Follow roads (local)** mode, the top-left **Road routes: N/total** control
+counts individual connections between adjacent stops, rather than route groups.
+For example, one Day 1 group with five stops has four connections. The count
+excludes short dashed access lines between the markers and their road paths.
+Expand **Why dashed lines?** for the local routing status and an explanation.
+
+**Prepare road routes** automatically loads detailed road areas in the
+background for unresolved connections. It shows **Preparing roads: x/y areas**
+and a **Cancel** button while running, then reports how many connections follow
+roads. The visible map does not move, and found paths are saved even when
+preparation is cancelled. The prepare button is hidden when every current
+connection has a road path. Internet is needed for areas absent from Maps cache.
+
 ## Follow roads locally
 
-**Follow roads (local)** is an experimental, approximate route mode. It reads
-road geometry from supported OpenMapTiles `transportation` vector sources already
-loaded by the official Maps view, builds a temporary road network and searches
-for a short path between each adjacent pair of markers. It keeps the order set by
-**Sequence** and processes independent route groups separately.
+**Follow roads (local)** is an experimental, approximate walking route mode. It
+reads geometry from supported OpenMapTiles `transportation` vector sources,
+builds a temporary road network and searches for a short path between each
+adjacent pair of markers. It keeps the order set by **Sequence** and processes
+independent route groups separately.
 
 The standard OpenFreeMap backgrounds are the intended starting point. Custom
 raster backgrounds contain pictures rather than road geometry, and other vector
-schemas may not expose a compatible road source. Connections without a retained
+schemas may not expose a compatible road source. Connections without a saved
 road path fall back to direct dashed lines when the source is unsupported.
 
-For the first calculation, use nearby stops within a small city area and zoom in
-until the streets and paths are detailed (zoom level 14 or closer). Wait for Maps
-to finish loading. Once a road path is found, its geometry stays visible when you
-zoom out or pan, even after those detailed road tiles leave the loaded area.
-Changing the map style also keeps paths already found for the current connections.
+A road drawn on a zoomed-out map does not necessarily provide the detailed,
+connected geometry needed for route calculation. **Prepare road routes** loads
+street detail automatically through one temporary hidden map, using the MapLibre
+runtime already installed with Maps and the current background's transport vector
+sources. The addon copies no marker sources, note data, sprites or icons to that
+map. The visible map's camera, style and markers remain unchanged. No manual
+zooming or panning is required to run preparation.
 
-New or unresolved connections still need detailed loaded roads. A wide view of a
-country does not contain every small street: available road detail depends on the
-map's zoom level and loaded tiles. A path may be unavailable when its connecting
-roads or necessary detour lie outside the loaded area. Moving stops or changing
-**Sequence**, filters or route groups updates the current connections; a retained
-path is reused only when its endpoints still match.
+The hidden map is reused across the selected areas and removed when preparation
+finishes or is cancelled. Each preparation is limited to 64 areas, an eight-second
+load wait per area and a two-minute overall deadline. Its tile cache is limited
+to 32 tiles. At most 200 unresolved connections are considered; nearby urban
+connections are prioritized. Legs longer than 30 km receive endpoint detail
+rather than an entire intercity tile corridor. The result can therefore be
+partial, with an explanation shown in the map control.
+
+The addon also reads detailed roads already loaded by the visible Maps view.
+While that view remains open, the bounded temporary road collection accumulates
+geometry from neighboring areas and preparation, allowing paths across those
+areas. Road data and graph construction remain local after tile loading.
+
+Found paths are saved automatically and stay visible when you zoom out, pan,
+change the map style, reopen the view or restart Obsidian. A saved path is reused
+when the ordered pair of endpoint coordinates still matches. Moving a stop,
+changing **Sequence**, or filtering stops can create a different connection that
+needs calculation or preparation. Changing colors or route labels does not
+invalidate a path with the same endpoints.
+
+If the nearest road belongs to an isolated fragment, the search can try another
+nearby road within 100 m. Markers keep their original coordinates, and short
+dashed access lines connect them to the chosen road path. This helps around
+parallel streets and disconnected paths, but cannot invent a bridge across water
+or recover road geometry absent from the prepared area. Ferry, flight and distant
+connections may remain straight dashed lines. A necessary detour outside the
+bounded prepared area can also leave a connection unresolved.
 
 Run **Maps Directions: Open local roads demo** for public example stops
 around Tokyo Station, with a detailed map and local routing already selected.
 It creates `Bases/Maps Directions Local Demo` without overwriting existing files.
-**Maps Directions: Check local routing** reports how many connections found a
-road path and explains when more map detail is needed.
+**Maps Directions: Check local routing** also reports how many connections found
+a road path and explains its current status.
 
 - Road paths use the available local network. They are not guaranteed to be the
   shortest path in the complete real-world road network.
@@ -170,23 +218,25 @@ road path and explains when more map detail is needed.
   bridges, tunnels and missing connections can prevent a route from being found.
 - A pair without a usable road path is shown as a **straight dashed line**.
   Other pairs can still follow roads.
-- Original markers keep their coordinates and appearance. Road routing does
-  not move them to a nearby street. Short dashed access lines connect pins to
-  their road path when they are up to 100 m from the nearest usable road.
 
 Graph construction and path search run in a bundled background worker. Input
 and search limits keep the experimental mode bounded; at most 200 connections
-are searched per update. Connections without a searched or retained road path
+are searched per update. Connections without a searched or saved road path
 use dashed fallback lines.
 
-Road data, the temporary network and retained route geometry stay in memory for
-the active view. Closing and reopening the view requires detailed roads again
-for its first calculation. This release does not download offline areas or
-persist a road database or route cache on disk. Maps loads
-its background as usual; there is no new routing service, API key or additional
-tile request from Directions. The availability of the Maps background without
-internet depends on its own loaded data and cache. Local calculation alone does
-not turn Maps into a complete offline map.
+The persistent cache stores route geometry only, not a road database or offline
+map areas. It is limited to 500 saved paths, 100,000 total coordinate vertices
+and 10,000 vertices per path. The oldest created or updated entries are removed
+when the limits are reached. Detailed road data and the temporary network remain
+in memory for the active view and are not saved to disk.
+
+Directions adds no routing service, API key or bundled map engine. Clicking
+**Prepare road routes** can make additional tile and metadata requests to the
+current map background's existing vector source providers through the temporary
+map. Ordinary use of the visible map also makes its usual background requests.
+Without internet, preparation depends on the background tiles already available
+in Maps cache. Saved path lines can be reused locally, but this does not provide
+a complete offline map or guarantee a route for every connection.
 
 ## Ordering and filters
 
@@ -223,10 +273,22 @@ been visually tested.
 
 ## Data and network
 
-Directions processes the current map's marker and road data locally. It has no
-telemetry, API keys, server, routing requests or additional tile requests. The
-official Maps plugin continues to make the background requests configured in Maps.
-No marker coordinates or note contents are sent to an additional routing provider.
+Directions processes marker data and searches the road network locally. It has
+no telemetry, external routing provider, server or new API key. The official
+Maps plugin continues to make its configured background requests.
+
+**Prepare road routes** makes additional map tile and metadata requests to the
+current background's vector source providers through a temporary hidden map.
+These requests happen only when preparation is explicitly started. Marker
+sources, note names and note contents are not copied to the temporary map or
+sent to an additional routing provider. As with normal map use, tile requests
+identify the geographic areas being loaded to the background provider.
+
+The bounded local cache in `.obsidian/plugins/maps-directions/data.json` stores
+ordered endpoint coordinates, route geometry and path distance. It does not
+store note names, note contents, route group names or a road tile database. Like
+other vault files, this plugin data may be included by your configured vault sync
+or backup tools.
 
 ## Development
 
@@ -235,6 +297,12 @@ No marker coordinates or note contents are sent to an additional routing provide
 - `src/geometry.ts` — numeric ordering, route grouping and direct line geometry.
 - `src/road-graph.ts` — local road network and path search.
 - `src/route-colors.ts` — stable group colors and property color selection.
+- `src/route-legend.ts` — grouped route labels and rendered line colors.
+- `src/route-status-control.ts` — local routing progress, preparation and cancellation.
+- `src/background-roads.ts` — bounded temporary-map road detail loading and cleanup.
+- `src/road-preparation-targets.ts` — bounded detail-area planning for unresolved connections.
+- `src/detailed-road-memory.ts` — bounded road accumulation for the active view.
+- `src/route-cache.ts` — bounded persistent endpoint-to-path geometry cache.
 - `src/directions-overlay.ts` — owned MapLibre layers and cleanup.
 - `src/settings.ts` — the additional Directions settings.
 - `src/demo.ts` — generated example data; no personal vault data is included.

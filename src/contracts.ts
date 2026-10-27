@@ -36,6 +36,8 @@ export interface GeoJSONSourceLike {
 export interface MapLike {
   getStyle?(): { sources?: Record<string, { type?: string }>; layers?: Array<{ source?: string; 'source-layer'?: string }> };
   getZoom?(): number;
+  getContainer?(): HTMLElement;
+  getCenter?(): { lng: number; lat: number };
   querySourceFeatures?(sourceId: string, options: { sourceLayer: string }): import('./road-graph').RoadFeature[];
   isStyleLoaded(): boolean;
   getSource(id: string): GeoJSONSourceLike | undefined;
