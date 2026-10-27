@@ -4,7 +4,7 @@ import type { RoadFeature } from './road-graph';
 export interface RoadMemoryLimits { features: number; positions: number }
 const DEFAULT_LIMITS: RoadMemoryLimits = { features: 12000, positions: 100000 };
 const MAX_LIMITS: RoadMemoryLimits = { features: 24000, positions: 200000 };
-const PROPERTY_KEYS = ['class', 'subclass', 'brunnel', 'layer', 'level', 'access', 'foot', 'indoor'];
+const PROPERTY_KEYS = ['class', 'subclass', 'brunnel', 'layer', 'level', 'access', 'foot', 'indoor', '__mapsDirectionsEndpointFlags'];
 
 /** Keeps bounded detailed geometry already seen by this map; it never loads tiles. */
 export class DetailedRoadMemory {

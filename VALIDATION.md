@@ -1,3 +1,48 @@
+# Validation — Maps Directions 0.6.2
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.
+
+- All 375 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- Known legacy working-data pauses automatically enter section routing when an
+  automatic Map view opens. Explicit user pauses, unknown errors and distance
+  exclusions retain their previous semantics; the default remains Eco and 30 km.
+- Production clipping, real road graphs and strict worker anchors verify connected
+  multi-window paths, a real detour requiring the wider corridor, alternative
+  frontier paths when the nearest street dead-ends, and date-line continuation.
+- Exact geometric intersections of same-grade road interiors become junctions.
+  Parallel gaps and different bridge/tunnel levels remain disconnected; bounded
+  spatial pair checks report truncation rather than exhausting unbounded work.
+- Global pin-to-road access defaults to 250 m and is adjustable from 0 to 1000 m.
+  Its dashed connector stays separate from verified road geometry. Access changes
+  automatically retry unresolved searches while preserving saved paths and pauses.
+- Internal seams require matching road level and bearing with at most 5 cm error;
+  they cannot use ordinary 100 m marker snapping. Stable millimetre-scale graph
+  coordinates prevent artificial seam shifts between overlapping snapshots.
+- Clip-created endpoints retain provenance and cannot invent bridge/ground
+  transitions. Original bridge entrances and same-grade tile stitching still
+  work. Metadata survives collection, repeated clipping and bounded road memory.
+- A window is clipped before applying working feature/coordinate budgets. Each
+  temporary map and worker graph is released between sections; CPU percentages
+  and total application memory remain measured, not guaranteed by a mode name.
+- Short-first scheduling remains scoped to the selected view and does not revive
+  paused tasks. Reverse walking-path reuse requires the same source and current
+  access allowance; it never reuses another source or mutates the original path.
+- Section checkpoints deep-clone and validate frontier anchors, levels, bearings,
+  cursor bounds and path joins. Reload and in-memory interruption preserve saved
+  prefixes; late results after pause, source or distance changes cannot commit.
+- Cancellation immediately after a checkpoint requeues the live connection without
+  requiring a reload. Completed paths for other connections remain unchanged.
+- Unavailable, timed-out, oversized or unsolved truncated section data receives
+  finite retries and corridor alternatives. A complete verified path can still be
+  used from a partial graph or partial tile wait; missing data alone never creates a road connection. Exhausted partial searches are Data unavailable,
+  never proof of no real path and never an endless automatic Resume loop.
+- The native working map starts known budget-stopped connections without pressing
+  Resume, shows saved section progress and retains its eligible-only trip counters.
+- Personal trip geometry, native resource samples, vault notes and cache files are
+  excluded from the repository and release. Algorithm tuning remains in 0.6.x.
+
+---
+
 # Validation — Maps Directions 0.6.1
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.

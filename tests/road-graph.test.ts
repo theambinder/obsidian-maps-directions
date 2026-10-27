@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildRoadGraph, roadDistance, type RoadFeature, type RoadCoordinate } from '../src/road-graph';
+import { buildRoadGraph, roadDistance, type RoadFeature, type RoadCoordinate, type RoadGate, type RoadAnchor } from '../src/road-graph';
+import { clipRoadFeature } from '../src/road-clipping';
 
 const feature = (coordinates: RoadCoordinate[], properties: Record<string, unknown> = {}): RoadFeature => ({
   geometry: { type: 'LineString', coordinates }, properties: { class: 'minor', ...properties },
@@ -224,7 +225,7 @@ test('alternative snapping never bridges a missing internal section of road', ()
   assert.equal(graph.route(metricPoint(0, 0), metricPoint(600, 0)), null);
 });
 
-test('alternative snapping respects the selected radius and the hard 100 metre limit', () => {
+test('alternative snapping preserves the 100 metre default and honors explicit radii up to 1000 metres', () => {
   const nearby = buildRoadGraph([
     metricRoad([[0, 0], [20, 0]]),
     metricRoad([[0, 80], [500, 80]]),
@@ -235,7 +236,12 @@ test('alternative snapping respects the selected radius and the hard 100 metre l
     metricRoad([[0, 0], [20, 0]]),
     metricRoad([[0, 101], [500, 101]]),
   ]);
-  assert.equal(outside.route(metricPoint(0, 0), metricPoint(500, 101), 1000), null);
+  assert.equal(outside.route(metricPoint(0, 0), metricPoint(500, 101)), null);
+  assert.ok(outside.route(metricPoint(0, 0), metricPoint(500, 101), 250));
+  const beyondMaximum = buildRoadGraph([metricRoad([[0, 1001], [500, 1001]])]);
+  assert.equal(beyondMaximum.route(metricPoint(0, 0), metricPoint(500, 1001), 100000), null);
+  const nearMaximum = buildRoadGraph([metricRoad([[0, 999], [500, 999]])]);
+  assert.ok(nearMaximum.route(metricPoint(0, 0), metricPoint(500, 999), 1000));
 });
 
 test('nearby alternatives still exclude roads without walking access', () => {
@@ -262,4 +268,250 @@ test('selects the shortest access plus road path among nearby connected alternat
   assert.ok(!contains(route.coordinates, metricPoint(0, 300)));
   close(route.distance, 500, 0.02);
   assert.deepEqual(graph.route(from, to), route);
+});
+
+const metricGate = (halfWidthMeters: number, maxPortals?: number): RoadGate => ({
+  from: metricPoint(-100, 0), to: metricPoint(100, 0), center: metricPoint(0, 0), halfWidthMeters, maxPortals,
+});
+
+test('portals are real allowed road intersections inside the gate, including its width boundary and distinct levels', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[-100, 0], [100, 0]]),
+    metricRoad([[-100, 40], [100, 40]], { brunnel: 'bridge', layer: 1 }),
+    metricRoad([[-100, -50], [100, -50]], { brunnel: 'tunnel', layer: -1 }),
+    metricRoad([[-100, 50.1], [100, 50.1]]),
+    metricRoad([[-100, 10], [100, 10]], { access: 'private' }),
+    metricRoad([[-100, 20], [100, 20]], { foot: 'no' }),
+    metricRoad([[10, 0], [20, 0]]),
+  ]);
+  const portals = graph.portals(metricGate(50));
+  assert.equal(portals.length, 3);
+  assert.deepEqual(new Set(portals.map(anchor => anchor.grade)), new Set(['ground|0|0', 'bridge|1|0', 'tunnel|-1|0']));
+  for (const anchor of portals) {
+    assert.ok(roadDistance(anchor.point, metricPoint(0, 0)) <= 50.000001);
+    close(anchor.point[0], 0, 1e-10);
+    assert.equal(anchor.bearing, 0);
+  }
+  assert.ok(portals.some(anchor => roadDistance(anchor.point, metricPoint(0, -50)) < 0.001));
+});
+
+test('portal discovery deduplicates shared road vertices and reversed tile fragments', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[-100, 0], [0, 0]]), metricRoad([[0, 0], [100, 0]]),
+    metricRoad([[100, 0], [0, 0]]), metricRoad([[0, 0], [-100, 0]]),
+  ]);
+  const portals = graph.portals(metricGate(50));
+  assert.equal(portals.length, 1);
+  assert.equal(portals[0].grade, 'ground|0|0');
+  assert.ok(roadDistance(portals[0].point, metricPoint(0, 0)) < 0.001);
+});
+
+test('limited portal selection covers lateral alternatives instead of a cluster and obeys its default and hard maximum', () => {
+  const roads: RoadFeature[] = Array.from({ length: 20 }, (_, index) => metricRoad([[-100, index * 2], [100, index * 2]]));
+  roads.push(metricRoad([[-100, -80], [100, -80]]), metricRoad([[-100, 80], [100, 80]]));
+  const graph = buildRoadGraph(roads), selected = graph.portals(metricGate(100, 3));
+  assert.equal(selected.length, 3);
+  for (const y of [0, -80, 80]) assert.ok(selected.some(anchor => roadDistance(anchor.point, metricPoint(0, y)) < 0.001));
+  assert.equal(graph.portals(metricGate(100)).length, 8);
+  assert.equal(graph.portals(metricGate(100, 100)).length, 12);
+  assert.deepEqual(graph.portals(metricGate(100, 0)), []);
+});
+
+test('portal selection is deterministic across feature order and reversed road directions', () => {
+  const roads = [-80, -20, 0, 2, 4, 30, 80].map((y, index) => metricRoad([[-100, y], [100, y]], index === 0 ? { brunnel: 'bridge', layer: 1 } : {}));
+  const reversed = [...roads].reverse().map(road => ({ ...road, geometry: { ...road.geometry!, coordinates: [...road.geometry!.coordinates as RoadCoordinate[]].reverse() } }));
+  const first = buildRoadGraph(roads).portals(metricGate(100, 4));
+  const second = buildRoadGraph(reversed).portals(metricGate(100, 4));
+  assert.deepEqual(second, first);
+});
+
+test('date-line gates return local anchors reusable on a clipped continuation of the same road', () => {
+  const gate: RoadGate = { from: [179.998, 0], to: [-179.998, 0], center: [180, 0], halfWidthMeters: 200 };
+  const graph = buildRoadGraph([feature([[179.999, 0], [-179.999, 0]])]);
+  const portals = graph.portals(gate);
+  assert.equal(portals.length, 1);
+  assert.ok(roadDistance(portals[0].point, [180, 0]) < 0.001);
+  const continuation = buildRoadGraph([feature([[-180, 0], [-179.999, 0]])]);
+  const route = continuation.route(portals[0].point, [-179.999, 0], 100, { from: portals[0] });
+  assert.ok(route);
+  assert.ok(route.distance < 120);
+});
+
+test('strict seam anchors cannot use ordinary access snapping or jump to a nearby connected component', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[-100, 0], [0, 0]]), metricRoad([[20, 0], [1000, 0]]),
+  ]);
+  const seam: RoadAnchor = { point: metricPoint(0, 0), grade: 'ground|0|0', bearing: 0 };
+  assert.ok(graph.route(seam.point, metricPoint(1000, 0)));
+  assert.equal(graph.route(seam.point, metricPoint(1000, 0), 100, { from: seam }), null);
+  const line = buildRoadGraph([metricRoad([[0, 0], [1000, 0]])]);
+  for (const meters of [0.06, 1, 99]) {
+    const offset: RoadAnchor = { ...seam, point: metricPoint(0, meters) };
+    assert.ok(line.route(offset.point, metricPoint(1000, 0)));
+    assert.equal(line.route(offset.point, metricPoint(1000, 0), 100, { from: offset }), null);
+  }
+  const closeAnchor: RoadAnchor = { ...seam, point: metricPoint(0, 0.04) };
+  assert.ok(line.route(closeAnchor.point, metricPoint(1000, 0), 100, { from: closeAnchor }));
+  assert.equal(line.route(metricPoint(0, 1), metricPoint(1000, 0), 100, { from: seam }), null);
+});
+
+test('strict seam grades and bearings prevent switching to another level or perpendicular same-level road', () => {
+  const seam: RoadAnchor = { point: metricPoint(0, 0), grade: 'bridge|1|0', bearing: 0 };
+  const surface = buildRoadGraph([metricRoad([[-100, 0], [100, 0]])]);
+  assert.equal(surface.route(seam.point, metricPoint(100, 0), 100, { from: seam }), null);
+  const vertical = buildRoadGraph([metricRoad([[0, -100], [0, 100]])]);
+  const ground = { ...seam, grade: 'ground|0|0' };
+  assert.ok(vertical.route(ground.point, metricPoint(0, 100), 100, { from: { point: ground.point, grade: ground.grade } }));
+  assert.equal(vertical.route(ground.point, metricPoint(0, 100), 100, { from: ground }), null);
+  const bridge = buildRoadGraph([metricRoad([[0, 0], [100, 0]], { brunnel: 'bridge', layer: 1 })]);
+  assert.ok(bridge.route(seam.point, metricPoint(100, 0), 100, { from: seam }));
+  assert.ok(bridge.route(seam.point, metricPoint(100, 0), 100, { from: { ...seam, bearing: 180 } }));
+  assert.equal(bridge.route(seam.point, metricPoint(100, 0), 100, { from: { ...seam, bearing: 90 } }), null);
+});
+
+test('nearby clipped tile endpoints cannot shift a road seam across the strict anchor tolerance', () => {
+  const windowRoads = (side: number): RoadFeature[] => [
+    metricRoad([[-100, side * 0.04], [-100, side * 5]]),
+    metricRoad([[100, side * 0.04], [100, side * 5]]),
+    metricRoad([[-100, 0], [100, 0]]),
+  ];
+  // The old 1e-6 node grid merged the main road with the first nearby endpoints:
+  // opposite tile cuts moved its two snapshots 8 cm apart, rejecting a real seam.
+  const previous = buildRoadGraph(windowRoads(1));
+  const next = buildRoadGraph(windowRoads(-1));
+  const anchor = previous.portals(metricGate(1, 1))[0];
+  assert.ok(anchor);
+  assert.ok(roadDistance(anchor.point, metricPoint(0, 0)) < 0.005);
+  assert.ok(next.route(anchor.point, metricPoint(90, 0), 100, { from: anchor }));
+  assert.deepEqual(buildRoadGraph([...windowRoads(1)].reverse()).portals(metricGate(1, 1)), [anchor]);
+});
+
+test('portals handle collinear gate roads and reject invalid gates and strict anchors', () => {
+  const graph = buildRoadGraph([metricRoad([[0, -100], [0, 100]])]);
+  const portal = graph.portals(metricGate(50, 1));
+  assert.equal(portal.length, 1);
+  assert.equal(portal[0].bearing, 90);
+  assert.ok(roadDistance(portal[0].point, [0, 0]) < 0.001);
+  for (const gate of [
+    { ...metricGate(50), halfWidthMeters: -1 }, { ...metricGate(50), halfWidthMeters: Infinity },
+    { ...metricGate(50), center: [0, NaN] as RoadCoordinate }, { ...metricGate(50), to: metricPoint(-100, 0) },
+  ]) assert.deepEqual(graph.portals(gate), []);
+  for (const bearing of [NaN, Infinity, -1, 181]) {
+    assert.equal(graph.route([0, 0], metricPoint(0, 100), 100, { from: { point: [0, 0], grade: 'ground|0|0', bearing } }), null);
+  }
+});
+
+test('artificial clipped endpoints never create bridge transitions while original bridge entrances still connect', () => {
+  const bounds = { west: metricPoint(-250, 0)[0], east: metricPoint(600, 0)[0] + 1e-9, south: metricPoint(0, -250)[1], north: metricPoint(0, 450)[1] };
+  const surface = metricRoad([[0, 200], [600, 0]]);
+  const overpass = metricRoad([[-500, 0], [1600, 0]], { brunnel: 'bridge', layer: 1 });
+  const original = buildRoadGraph([surface, overpass]);
+  assert.equal(original.route(metricPoint(0, 200), metricPoint(1400, 0)), null);
+  const clipped = [surface, overpass].map(road => clipRoadFeature(road, bounds)!);
+  assert.equal(clipped[0].properties!.__mapsDirectionsEndpointFlags, '11');
+  assert.equal(clipped[1].properties!.__mapsDirectionsEndpointFlags, '00');
+  for (const roads of [clipped, [...clipped].reverse()]) {
+    const graph = buildRoadGraph(roads);
+    const destination: RoadAnchor = { point: metricPoint(500, 0), grade: 'bridge|1|0', bearing: 0 };
+    assert.equal(graph.route(metricPoint(0, 200), destination.point, 100, { to: destination }), null);
+  }
+  const entranceBounds = { ...bounds, east: metricPoint(900, 0)[0] };
+  const bridgeEntrance = metricRoad([[600, 0], [1600, 0]], { brunnel: 'bridge', layer: 1 });
+  const legitimate = [surface, bridgeEntrance].map(road => clipRoadFeature(road, entranceBounds)!);
+  assert.equal(legitimate[1].properties!.__mapsDirectionsEndpointFlags, '10');
+  const graph = buildRoadGraph(legitimate);
+  const destination: RoadAnchor = { point: metricPoint(800, 0), grade: 'bridge|1|0', bearing: 0 };
+  assert.ok(graph.route(metricPoint(0, 200), destination.point, 100, { to: destination }));
+});
+
+test('endpoint provenance restricts cross-grade joins on both sides and rejects malformed multiline flags', () => {
+  const from = metricPoint(0, 0), to = metricPoint(600, 0);
+  const surface = metricRoad([[0, 0], [300, 0]]);
+  const bridge = metricRoad([[300, 0], [600, 0]], { brunnel: 'bridge', layer: 1 });
+  const marked = (road: RoadFeature, flags: unknown): RoadFeature => ({ ...road, properties: { ...road.properties, __mapsDirectionsEndpointFlags: flags } });
+  assert.ok(buildRoadGraph([marked(surface, '11'), marked(bridge, '11')]).route(from, to));
+  assert.equal(buildRoadGraph([marked(surface, '10'), marked(bridge, '11')]).route(from, to), null);
+  assert.equal(buildRoadGraph([marked(surface, '11'), marked(bridge, '01')]).route(from, to), null);
+  for (const flags of [null, 11, '', '1', '111', '11|00', 'x1']) {
+    assert.equal(buildRoadGraph([surface, marked(bridge, flags)]).route(from, to), null);
+  }
+  const multiline: RoadFeature = { properties: { class: 'minor', brunnel: 'bridge', layer: 1, __mapsDirectionsEndpointFlags: '11|bad' }, geometry: {
+    type: 'MultiLineString', coordinates: [[metricPoint(300, 0), metricPoint(600, 0)], [metricPoint(0, 1000), metricPoint(600, 1000)]],
+  } };
+  assert.equal(buildRoadGraph([surface, multiline]).route(from, to), null);
+});
+
+test('same-grade artificial clipping endpoints retain T-junction stitching', () => {
+  const bounds = { west: metricPoint(-250, 0)[0], east: metricPoint(250, 0)[0], south: metricPoint(0, -250)[1], north: 0 };
+  const clipped = [metricRoad([[-500, 0], [500, 0]]), metricRoad([[0, -500], [0, 500]])].map(road => clipRoadFeature(road, bounds)!);
+  assert.ok(clipped.every(road => road.properties!.__mapsDirectionsEndpointFlags === '00'));
+  const graph = buildRoadGraph(clipped);
+  const route = graph.route(metricPoint(0, -200), metricPoint(200, 0));
+  assert.ok(route);
+  close(route.distance, 400);
+  assert.ok(contains(route.coordinates, metricPoint(0, 0)));
+});
+
+test('exact same-grade interior crossings create real junctions without shared source vertices', () => {
+  const from: RoadAnchor = { point: metricPoint(-500, 0), grade: 'ground|0|0', bearing: 0 };
+  const to: RoadAnchor = { point: metricPoint(0, 500), grade: 'ground|0|0', bearing: 90 };
+  const roads = [metricRoad([[-500, 0], [500, 0]]), metricRoad([[0, -500], [0, 500]])];
+  for (const input of [roads, [...roads].reverse()]) {
+    const graph = buildRoadGraph(input);
+    const route = graph.route(from.point, to.point, 100, { from, to });
+    assert.ok(route);
+    assert.ok(contains(route.coordinates, metricPoint(0, 0)));
+    close(route.distance, 1000);
+    assert.equal(graph.stats.truncated, false);
+  }
+});
+
+test('inserted interior junctions do not become original endpoints for cross-grade transitions', () => {
+  const graph = buildRoadGraph([
+    metricRoad([[-500, 0], [500, 0]]),
+    metricRoad([[0, -500], [0, 500]]),
+    metricRoad([[0, 0], [0, 1500]], { brunnel: 'bridge', layer: 1 }),
+  ]);
+  const ground: RoadAnchor = { point: metricPoint(-500, 0), grade: 'ground|0|0', bearing: 0 };
+  const onGround: RoadAnchor = { point: metricPoint(0, 400), grade: 'ground|0|0', bearing: 90 };
+  const onBridge: RoadAnchor = { point: metricPoint(0, 1200), grade: 'bridge|1|0', bearing: 90 };
+  assert.ok(graph.route(ground.point, onGround.point, 100, { from: ground, to: onGround }));
+  assert.equal(graph.route(ground.point, onBridge.point, 1000, { from: ground, to: onBridge }), null);
+});
+
+test('exact intersection handling never joins separated parallel roads or same-location different grades', () => {
+  const parallel = buildRoadGraph([
+    metricRoad([[-500, 0], [500, 0]]), metricRoad([[-500, 2], [500, 2]]),
+  ]);
+  const from: RoadAnchor = { point: metricPoint(-500, 0), grade: 'ground|0|0', bearing: 0 };
+  const to: RoadAnchor = { point: metricPoint(500, 2), grade: 'ground|0|0', bearing: 0 };
+  assert.equal(parallel.route(from.point, to.point, 1000, { from, to }), null);
+  for (const properties of [{ brunnel: 'bridge', layer: 1 }, { brunnel: 'tunnel', layer: -1 }, { level: 1 }]) {
+    const crossing = buildRoadGraph([metricRoad([[-500, 0], [500, 0]]), metricRoad([[0, -500], [0, 500]], properties)]);
+    assert.equal(crossing.route(metricPoint(-500, 0), metricPoint(0, 500)), null);
+  }
+});
+
+test('exact interior intersections remain local across the date line', () => {
+  const graph = buildRoadGraph([
+    feature([[179.999, 0], [-179.999, 0]]), feature([[-180, -0.001], [-180, 0.001]]),
+  ]);
+  const from: RoadAnchor = { point: [179.999, 0], grade: 'ground|0|0', bearing: 0 };
+  const to: RoadAnchor = { point: [-180, 0.001], grade: 'ground|0|0', bearing: 90 };
+  const route = graph.route(from.point, to.point, 100, { from, to });
+  assert.ok(route);
+  close(route.distance, roadDistance(from.point, [-180, 0]) + roadDistance([-180, 0], to.point));
+  assert.ok(Math.abs(route.coordinates[0][0] - route.coordinates.at(-1)![0]) < 0.01);
+});
+
+test('dense exact-intersection work stops at the shared join budget instead of checking every pair', () => {
+  const roads = Array.from({ length: 1100 }, (_, index) => {
+    const angle = index / 1100 * Math.PI;
+    const x = Math.cos(angle) * 10, y = Math.sin(angle) * 10;
+    return metricRoad([[-x, -y], [x, y]]);
+  });
+  const graph = buildRoadGraph(roads);
+  assert.equal(graph.stats.truncated, true);
+  assert.ok(graph.stats.nodes <= 3300);
+  assert.ok(graph.stats.edges <= 5500);
 });

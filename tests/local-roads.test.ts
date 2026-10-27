@@ -64,3 +64,34 @@ test('working feature and coordinate budgets are configurable and discard an ove
   assert.equal(collectLocalRoads(map(roads), { maxPositions: 3 }).state, 'limited');
   assert.equal(collectLocalRoads(map(roads), { maxFeatures: NaN, maxPositions: Infinity }).state, 'ready');
 });
+
+test('clipping excludes outside geometry before counting feature and coordinate budgets', () => {
+  const outside = Array.from({ length: 20 }, (_, index) => line(140 + index / 100));
+  const source = map([...outside, line(139)]);
+  const clipBounds = { west: 139.002, south: 34.9, east: 139.004, north: 35.1 };
+  assert.equal(collectLocalRoads(source, { maxFeatures: 1, maxPositions: 2 }).state, 'limited');
+  const clipped = collectLocalRoads(source, { maxFeatures: 1, maxPositions: 2, clipBounds });
+  assert.equal(clipped.state, 'ready');
+  assert.equal(clipped.features.length, 1);
+  const coordinates = clipped.features[0].geometry!.coordinates as number[][];
+  assert.equal(coordinates.length, 2);
+  assert.ok(Math.abs(coordinates[0][0] - clipBounds.west) < 1e-9);
+  assert.ok(Math.abs(coordinates[1][0] - clipBounds.east) < 1e-9);
+  assert.equal(clipped.features[0].properties?.name, undefined);
+  assert.equal(clipped.features[0].properties?.__mapsDirectionsEndpointFlags, '00');
+  assert.equal(source.queries, 2);
+  assert.equal(collectLocalRoads(map(outside), { maxFeatures: 1, maxPositions: 2, clipBounds }).state, 'empty');
+});
+
+test('road collection preserves endpoint provenance while dropping unrelated source metadata', () => {
+  const original = line(139);
+  original.properties = { ...original.properties, __mapsDirectionsEndpointFlags: '10' };
+  const loaded = collectLocalRoads(map([original]));
+  assert.equal(loaded.features[0].properties?.__mapsDirectionsEndpointFlags, '10');
+  assert.equal(loaded.features[0].properties?.name, undefined);
+  const clipped = collectLocalRoads(map(loaded.features), { clipBounds: { west: 138, south: 34, east: 140, north: 36 } });
+  assert.equal(clipped.features[0].properties?.__mapsDirectionsEndpointFlags, '10');
+  const cut = collectLocalRoads(map(loaded.features), { clipBounds: { west: 139.002, south: 34, east: 140, north: 36 } });
+  assert.equal(cut.features[0].properties?.__mapsDirectionsEndpointFlags, '00');
+  assert.equal(original.properties.__mapsDirectionsEndpointFlags, '10');
+});

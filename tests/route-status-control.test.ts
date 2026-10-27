@@ -204,6 +204,16 @@ test('running preparation keeps cancellation available when all paths have been 
   assert.equal(cancels, 3);
 });
 
+test('automatic section work shows its saved section progress while keeping Pause available', () => {
+  const control = new RouteStatusControl(), container = host();
+  const message = 'Preparing smaller sections: 4/12 saved (attempt 2/3).';
+  control.update(element(container), data('fallback'), true, '', () => {},
+    { running: true, completed: 4, total: 12, unit: 'sections', message }, () => {}, true, tripSnapshot());
+  const root = container.children[0];
+  assert.equal(root.children[1].textContent, message);
+  assert.equal(root.children[0].children[1].textContent, 'Pause');
+});
+
 test('completed preparation message is safe text and normal preparation can be retried', () => {
   const control = new RouteStatusControl();
   const container = host();

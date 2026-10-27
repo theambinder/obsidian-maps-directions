@@ -1,5 +1,6 @@
 import type { MapLike } from './contracts';
 import type { RoadFeature } from './road-graph';
+import { clipRoadFeature, type RoadClipBounds } from './road-clipping';
 
 export const MIN_ROAD_ZOOM = 14;
 const MAX_FEATURES = 12000;
@@ -10,6 +11,7 @@ export interface RoadCollectionOptions {
   minZoom?: number;
   maxFeatures?: number;
   maxPositions?: number;
+  clipBounds?: RoadClipBounds;
 }
 
 function budget(value: number | undefined, fallback: number, min: number, max: number): number {
@@ -45,13 +47,15 @@ export function collectLocalRoads(map: Pick<MapLike, 'getStyle' | 'getZoom' | 'q
     let roads: RoadFeature[];
     try { roads = map.querySourceFeatures(source, { sourceLayer: 'transportation' }); }
     catch { continue; } // A custom vector source can omit this tile layer.
-    for (const road of roads) {
+    for (const original of roads) {
+      const road = options.clipBounds ? clipRoadFeature(original, options.clipBounds) : original;
+      if (!road) continue;
       const geometry = road.geometry;
       if (!geometry || (geometry.type !== 'LineString' && geometry.type !== 'MultiLineString') || !Array.isArray(geometry.coordinates)) continue;
       const properties = road.properties ?? {};
       const feature: RoadFeature = {
         geometry: { type: geometry.type, coordinates: geometry.coordinates },
-        properties: Object.fromEntries(['class', 'subclass', 'brunnel', 'layer', 'level', 'access', 'foot', 'indoor']
+        properties: Object.fromEntries(['class', 'subclass', 'brunnel', 'layer', 'level', 'access', 'foot', 'indoor', '__mapsDirectionsEndpointFlags']
           .filter(key => properties[key] !== undefined).map(key => [key, properties[key]])),
       };
       const signature = JSON.stringify(feature);

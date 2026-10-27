@@ -37,6 +37,19 @@ export class MapsDirectionsSettingTab extends PluginSettingTab {
         });
       });
     new Setting(container)
+      .setName('Maximum pin-to-road access (m)')
+      .setDesc('Default 250 m; range 0–1000 m. Pin access to a nearby allowed road is an unverified dashed connector. Larger values can select the wrong road or side and require an unverified walk. Internal road sections never jump gaps. 0 requires the pin to be on a road. Changing this value retries unresolved searches with automatic preparation enabled; saved complete paths and existing pauses are kept.')
+      .addText(text => {
+        text.inputEl.type = 'number';
+        text.inputEl.min = '0'; text.inputEl.max = '1000'; text.inputEl.step = '1';
+        text.setValue(String(settings.maxAccessMeters)).onChange(value => {
+          if (!value.trim()) return;
+          const access = Number(value);
+          if (!Number.isFinite(access) || access < 0 || access > 1000) return;
+          void this.commit({ ...readWorkloadSettings(this.getSettings()), maxAccessMeters: access });
+        });
+      });
+    new Setting(container)
       .setName('Processing mode')
       .setDesc('All modes run one background job at a time. Modes control chunk size, working road data and pauses; they do not guarantee a CPU percentage or a fixed amount of RAM.')
       .addDropdown(dropdown => dropdown.addOptions({ eco: 'Eco (default)', balanced: 'Balanced', maximum: 'Maximum' })

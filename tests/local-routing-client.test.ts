@@ -104,6 +104,27 @@ test('wrong-id replies are ignored and the matching reply resolves only its own 
   } finally { client.cancel(); runtime.restore(); }
 });
 
+test('anchor constraints and a portal gate reach the worker and portal results return unchanged', async () => {
+  const runtime = mockRuntime();
+  const client = new LocalRoutingClient();
+  const fromAnchor = { point: [139, 35] as [number, number], grade: 'ground|0|0', bearing: 90 };
+  const toAnchor = { point: [139.001, 35] as [number, number], grade: 'ground|0|0', bearing: 90 };
+  const anchoredLegs: RoutingJob['legs'] = [{ ...legs[0], fromAnchor, toAnchor, maxSnapMeters: 750 }];
+  const gate: NonNullable<RoutingJob['gate']> = { from: [139, 35], to: [139.001, 35], center: [139.0005, 35], halfWidthMeters: 100, maxPortals: 4 };
+  try {
+    const pending = client.route(snapshot, anchoredLegs, gate);
+    const worker = runtime.workers[0];
+    assert.deepEqual(worker.messages[0], { id: 1, graphKey: snapshot.key, features: snapshot.features, legs: anchoredLegs, gate });
+    const response: RoutingResult = { ...result(1), portals: [fromAnchor, toAnchor] };
+    worker.reply(response);
+    assert.deepEqual(await pending, response);
+    const ordinary = client.route(snapshot, legs);
+    assert.equal(Object.hasOwn(worker.messages[1], 'gate'), false);
+    worker.reply(result(2));
+    assert.equal(Object.hasOwn(await ordinary, 'portals'), false);
+  } finally { client.cancel(); runtime.restore(); }
+});
+
 test('a replacement job cancels its predecessor and ignores the old worker reply', async () => {
   const runtime = mockRuntime();
   const client = new LocalRoutingClient();

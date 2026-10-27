@@ -13,7 +13,12 @@ scope.onmessage = ({ data: job }) => {
       graph = buildRoadGraph(job.features);
       graphKey = job.graphKey;
     }
-    scope.postMessage({ id: job.id, routes: job.legs.map(leg => graph!.route(leg.from, leg.to)), stats: graph.stats });
+    scope.postMessage({
+      id: job.id,
+      routes: job.legs.map(leg => graph!.route(leg.from, leg.to, leg.maxSnapMeters ?? 100, { from: leg.fromAnchor, to: leg.toAnchor })),
+      stats: graph.stats,
+      ...(job.gate ? { portals: graph.portals(job.gate) } : {}),
+    });
   } catch {
     graph = null;
     graphKey = '';

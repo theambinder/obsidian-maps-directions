@@ -10,6 +10,7 @@ export interface RoadPreparationProgress {
   completed: number;
   total: number;
   message?: string;
+  unit?: 'areas' | 'sections';
 }
 
 /** Access connectors are part of a connection, not additional route legs. */
@@ -25,7 +26,7 @@ export function getRoadRouteProgress(data: FeatureCollection): RoadRouteProgress
 
 const ROAD_HELP = 'Prepare road routes loads detailed map areas in the background and saves found walking paths. Internet is needed for areas absent from Maps cache. Dashed lines may remain for disconnected paths, ferry or flight legs.';
 const AUTOMATIC_ROAD_HELP = 'Saved paths appear immediately. Missing walking paths are prepared automatically in the background when the map opens. Internet is needed for areas absent from Maps cache. Dashed lines may remain for disconnected paths, ferry or flight legs.';
-const QUEUE_HELP = 'Progress counts eligible connection tasks, including paths not found or unavailable data. It does not mean every route was found. Connections above the distance limit are excluded from progress and shown separately as skipped. Paused connections remain unfinished. Completed tasks are saved; an interrupted connection may reload its temporary roads after reopening.';
+const QUEUE_HELP = 'Progress counts eligible connection tasks, including paths not found or unavailable data. It does not mean every route was found. Connections above the distance limit are excluded from progress and shown separately as skipped. Paused connections remain unfinished. Pin-to-road access is shown dashed and is not a verified walking path. Completed tasks are saved; an interrupted connection may reload its temporary roads after reopening.';
 const RESOURCE_HELP = 'Obsidian window process, includes other plugins; GPU excluded. CPU 100% means one logical core.';
 const measured = (value: number | null | undefined, decimals = 0): string => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(Number(value.toFixed(decimals))) : '—';
 const queueNumber = (value: number): number => Number.isFinite(value) ? Math.max(0, value) : 0;
@@ -81,7 +82,7 @@ export class RouteStatusControl {
     const manualMissing = queueProgress ? remaining : progress.missing;
     const showButton = running || resumable && onPrepare !== null || !automatic && manualMissing > 0 && onPrepare !== null;
     const preparationText = running
-      ? `Preparing roads: ${preparation!.completed}/${preparation!.total} areas`
+      ? preparation!.unit === 'sections' ? preparation!.message ?? `Preparing smaller road sections: ${preparation!.completed}/${preparation!.total}` : `Preparing roads: ${preparation!.completed}/${preparation!.total} areas`
       : preparation?.message ?? (queueProgress?.paused ? `${queueProgress.paused} connections paused. Open details for the reason.` : '');
     const queueText = queueProgress
       ? `Processed ${queueNumber(queueProgress.processed)}/${eligible} eligible connections (${measured(Math.min(100, queueNumber(queueProgress.percentComplete)), 1)}%) · Remaining: ${remaining} (${measured(Math.min(100, queueNumber(queueProgress.percentRemaining)), 1)}%) · Skipped by distance: ${queueNumber(queueProgress.direct ?? 0)}`

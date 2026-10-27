@@ -52,7 +52,7 @@ export interface BackgroundRoadPreparationOptions {
   viewportWidth?: number;
   viewportHeight?: number;
   tileCacheSize?: number;
-  roadLimits?: Pick<RoadCollectionOptions, 'maxFeatures' | 'maxPositions'>;
+  roadLimits?: Pick<RoadCollectionOptions, 'maxFeatures' | 'maxPositions' | 'clipBounds'>;
   /** Per-area wait, capped at eight seconds. */
   timeoutMs?: number;
   /** Deadline for this working chunk, not for the whole trip. At most two minutes. */

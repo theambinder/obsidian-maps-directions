@@ -1298,6 +1298,32 @@ function allElementText(element: OverlayTestElement): string {
   return [element.textContent, ...element.children.map(allElementText)].join(' ');
 }
 
+test('opening an automatic map upgrades old Eco budget pauses without reviving an explicit user pause', async () => {
+  const subject = smartPreparationSetup({ automatic: true });
+  subject.overlay.update();
+  const task = subject.ledger.serialize().tasks[0];
+  subject.ledger.pause(task.key, 'Working data limit in Eco. Select a larger workload mode and Resume.');
+  subject.overlay.update();
+  assert.equal(subject.ledger.status(task.key)?.state, 'queued');
+  assert.deepEqual(subject.ledger.get(task.key)?.split, { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [] });
+  await waitForAutomatic();
+  assert.equal(subject.background.calls.length, 1);
+  assert.ok(subject.background.calls[0].options.roadLimits?.clipBounds);
+  subject.overlay.destroy();
+  subject.background.finish(0);
+  await settleAutomatic();
+
+  const paused = smartPreparationSetup({ automatic: true });
+  paused.overlay.update();
+  const key = paused.ledger.serialize().tasks[0].key;
+  paused.ledger.pause(key, 'User paused. Resume continues pending connections.');
+  paused.overlay.update();
+  await waitForAutomatic();
+  assert.equal(paused.ledger.status(key)?.state, 'paused');
+  assert.equal(paused.background.calls.length, 0);
+  paused.overlay.destroy();
+});
+
 test('the production 30 km default draws long grouped connections as solid colored arrows without allocating road work', async () => {
   const profile = workloadProfile({ mode: 'eco', pauseMs: 0 });
   assert.equal(profile.maxDistanceKm, 30);

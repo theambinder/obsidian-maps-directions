@@ -21,7 +21,7 @@ layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.6.1 is a testing prerelease, not an Obsidian directory submission.
+Version 0.6.2 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -31,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.6.1.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.6.2.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -48,12 +48,14 @@ The installation ZIP is `dist/maps-directions-0.6.1.zip`. You can also copy
 8. In local mode, saved paths appear immediately and missing paths prepare in
    the background. **Automatically prepare roads** is on by default. Progress
    and **Pause/Resume** controls show the saved queue state; the visible map
-   stays in place. **Road routes: N/total** counts found paths, while preparation
+   stays in place. **Road routes: N/eligible** counts found paths, while preparation
    progress separately shows processed eligible connections and the percentage
    remaining. Distance-excluded connections are counted separately.
    The **Routes** legend identifies each group and its line color.
    The global **Maximum road-routing distance (km)** defaults to 30 km; longer
    connections stay straight and do not load roads for calculation.
+   **Maximum pin-to-road access (m)** defaults to 250 m. Access from a pin to its
+   chosen road is shown separately as an unverified dashed connector.
 
 Connections are disabled by default for existing views. **Straight line** remains
 the default route mode, including for bases created by version 0.1.0. Settings are
@@ -156,7 +158,7 @@ color of its line, in all three color modes. A blank group is labeled
 **Ungrouped**. The legend scrolls when there are many groups and disappears when
 there are no connections or no grouping property.
 
-In **Follow roads (local)** mode, **Road routes: N/total** counts found paths
+In **Follow roads (local)** mode, **Road routes: N/eligible** counts found paths
 between adjacent stops, rather than route groups. One Day 1 group with five stops
 has four connections. Short access lines between pins and their road paths do
 not add to that count.
@@ -185,14 +187,15 @@ does not mean every eligible connection found a road path.** Result counts disti
   available detailed network.
 - **Data unavailable** — the available road detail is insufficient, a source or
   network request failed, or a long connection needs regional routing data.
-- **Paused** — work is stopped by the user or one working part exceeded its data
-  or computation budget. The reason is shown; this is not counted as a completed
-  route search.
+- **Paused** — work is stopped by the user or an unexpected failure needs an
+  explicit retry. The reason is shown; this is not counted as a completed search.
 
 **Pause** preserves the queue. **Resume** continues pending work with the current
 plugin-wide processing settings. It does not silently increase memory or time
-budgets. If the reason is a working-data limit, select a larger processing mode
-before resuming that connection. Other queued connections can still be processed.
+budgets. Working-data limits instead switch automatically to smaller road
+sections within the selected mode. Existing known resource-limit pauses from
+older versions are upgraded to that strategy; user pauses and unrecognized
+failures stay paused. Other queued connections can still be processed.
 Expand the on-map explanation for detailed state and resource scope.
 
 ## Saved preparation queue
@@ -206,14 +209,19 @@ map runs at a time.
 There is no fixed limit on the number of connections or map areas in the whole
 trip, and no two-minute cut-off for the whole itinerary. The queue processes one
 connection at a time in small chunks, saves outcomes and progresses to the next
-connection. A working-data limit pauses the affected connection with a reason
-instead of marking all unprocessed connections as unavailable. Remaining queued
-connections are not discarded when a chunk ends.
+connection. When a whole-connection search reaches its working-data or worker
+budget, it automatically tries smaller overlapping sections. It saves verified
+section paths and continues without requiring **Resume** for that budget limit.
+Remaining queued connections are not discarded when a chunk ends. Shorter queued
+connections get priority. Because this local walking graph is undirected, an
+existing reverse path can be reused from the same source when its pin access
+meets the current setting; this avoids calculating an identical return walk.
 
 The queue, progress, per-connection reasons and completed route geometry survive
 closing the map and restarting Obsidian. A user-paused task stays paused until
-**Resume**. Temporary road networks are not saved: an interrupted connection
-rebuilds its own small area plan after reopening, while previously completed
+**Resume**. Temporary road networks are not saved. An ordinary interrupted search
+rebuilds its small area plan; a section search preserves its plan and verified
+path prefixes and continues from the saved frontier after reopening. Completed
 connections keep their saved paths and outcomes.
 
 Changing endpoints creates a new connection. The source configuration is included
@@ -227,8 +235,9 @@ is needed for road data absent from Maps cache.
 
 ## Global processing settings
 
-Open **Settings → Maps Directions** to choose the maximum routing distance, a
-processing mode and the pause between chunks. **Eco** is the default. These preferences apply across map views;
+Open **Settings → Maps Directions** to choose the maximum routing distance,
+pin-to-road access distance, processing mode and pause between chunks. **Eco**
+is the default. These preferences apply across map views;
 they are not added to each map's Directions configuration.
 
 **Maximum road-routing distance (km)** defaults to **30**. The distance is the
@@ -245,10 +254,24 @@ shown straight while the preference is active. Previously calculated geometry is
 kept, so raising or disabling the threshold can restore that path without
 calculating it again. Connections that have not previously been calculated enter
 the normal queue when they become eligible. Changing processing mode or pause
-preserves the distance setting.
+preserves the distance and pin-access settings.
 
 This is an explicit per-connection preference, not a hidden cap on the number of
 connections in the trip.
+
+**Maximum pin-to-road access (m)** defaults to **250** and accepts **0–1000 m**.
+It exposes the previous fixed 100 m allowance for matching original pins to
+nearby allowed roads. Set **0** to require pins to be on the road geometry. The
+pin retains its original coordinates; any access to the chosen road is displayed
+as a dashed connector and is **not a verified walking path**. A larger value can
+select the wrong road or side of a barrier and require an unverified walk. This
+setting applies only at original pins. Internal section joins still require
+matching road anchors and cannot jump between nearby disconnected roads.
+Changing the allowance queues unresolved connections again, including completed
+**No path** and **Data unavailable** outcomes. Active saved section prefixes
+restart with the new allowance. With **Automatically prepare roads** enabled,
+those searches retry without manual **Retry** or **Resume**. Completed saved
+routes, explicit user pauses and pauses for unexpected failures are kept.
 
 | Mode | Areas per chunk | Default pause | Hidden viewport | Tile cache | Working road lines / coordinates | Worker timeout |
 | --- | ---: | ---: | --- | ---: | --- | ---: |
@@ -293,15 +316,35 @@ straight before planning or loading road areas. When the threshold is raised or
 disabled, a long connection's regional overview may still be insufficient for a complete walking path;
 that outcome is shown as **Data unavailable**, with an explanation, rather than
 proof that no route exists. A dense area is subdivided into smaller overlapping
-views up to street detail level 16. If it still exceeds the working budget, the
-connection is paused with a working-data reason.
+views up to street detail level 16. If that is insufficient, or an accumulated
+network exceeds the selected working budget, calculation automatically switches
+to overlapping local sections.
 
-Road geometry and the graph for one connection remain in memory across its small
-chunks. After the connection finishes, that working network is released before
-processing another connection. This reduces peak working memory across a trip
-with many cities. A single difficult long connection can still require more data
-or a dedicated regional routing graph; chunking does not make every long route
-cheap or guarantee a globally shortest path.
+The initial search retains a bounded network across its chunks. The section
+fallback builds a separate graph for each small window, saves verified path
+prefixes, then releases the local road network and worker graph before the next
+window. It considers several real road crossings at each seam. Internal anchors
+must match the same road level and direction, with at most 5 cm projection error;
+the configurable pin-access allowance is not used to join sections. This prevents a
+straight shortcut between disconnected roads or between bridge and ground levels.
+
+Ground roads at the same level also connect at geometric intersections when the
+tile lines have no explicit vertex at the crossing. Bridge, tunnel and different
+level crossings remain separated unless a valid road endpoint transition exists.
+Clipping a window cannot manufacture such a transition from an artificial endpoint.
+
+The fallback makes up to three attempts with progressively wider corridors and
+shorter forward steps. It does not retry the same whole-connection network
+indefinitely. If those attempts cannot assemble a connected path, the result is
+**Data unavailable**, with an explanation, rather than a false claim that no
+walking path exists. The finite corridor and candidate search cannot guarantee
+every route or the globally shortest path, particularly around water, mountains,
+large detours or incomplete map topology.
+
+Smaller working networks bound retained road data; they do not guarantee lower
+instantaneous CPU use. Repeated tile loading, graph construction and saved-prefix
+writes can increase total calculation time, network activity, shared HTTP cache
+size and addon data size. The selected processing mode and pauses still apply.
 
 Found paths are saved automatically. Durable trip results do not depend on the
 small opportunistic path cache and are not silently evicted after 500 paths or
@@ -310,8 +353,10 @@ the processed connections. This is not an on-disk road tile database, and the
 background's own availability offline is still governed by Maps and its cache.
 
 If the nearest road belongs to an isolated fragment, the search can try another
-nearby road within 100 m. Markers keep their original coordinates, and short
-dashed access lines connect them to the chosen road path. Missing road geometry,
+allowed road within **Maximum pin-to-road access (m)**, which defaults to 250 m.
+Markers keep their original coordinates, and unverified dashed access lines
+connect them to the chosen road path. Increasing this allowance can choose the
+wrong road or side and does not verify that the access walk is possible. Missing road geometry,
 bridges, tunnels and required detours can still prevent a route from being found.
 
 Walking restrictions are a choice in this addon's routing algorithm, not a
@@ -354,7 +399,9 @@ starts a new comparison baseline. A negative change means the file became smalle
 it is not a download counter. Unsupported file statistics are shown as unavailable.
 
 That file contains preferences, queue metadata, area plans, progress, retry
-metadata and saved route coordinates. More stored connections or more detailed
+metadata, saved section frontiers and route coordinates. Section calculations
+can temporarily retain several verified path prefixes; those checkpoints are
+replaced by the final result when the connection finishes. More stored connections or more detailed
 saved paths can make it grow. Distance alone does not determine its size: the
 number of areas, coordinate vertices and retained results matters. Working road
 lines and the search graph are temporary RAM data, not an addon-managed tile

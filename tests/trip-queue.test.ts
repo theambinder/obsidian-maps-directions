@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { TripQueue, tripConnectionKey, planTripConnection, subdivideTripArea, type TripArea, type TripConnection, exceedsRoadDistance } from '../src/trip-queue';
+import { TripQueue, tripConnectionKey, planTripConnection, subdivideTripArea, type TripArea, type TripConnection, type TripSplitProgress, exceedsRoadDistance } from '../src/trip-queue';
 import { roadDistance, type RoadRoute } from '../src/road-graph';
 
 const areas: TripArea[] = [
@@ -9,6 +9,8 @@ const areas: TripArea[] = [
 ];
 function connection(key: string): TripConnection { return { key, from: [114, 22], to: [114.01, 22], areas: areas.map(area => ({ ...area, center: [...area.center] })) }; }
 const route: RoadRoute = { coordinates: [[114, 22], [114.005, 22.001], [114.01, 22]], distance: 1200 };
+const splitProgress = (): TripSplitProgress => ({ version: 1, pass: 1, nextPart: 2, totalParts: 4,
+  frontier: [{ anchor: { point: [114.01, 22], grade: 'ground|0|0' }, route: structuredClone(route) }] });
 
 test('connection identity normalizes longitude, preserves direction and changes with the source', () => {
   const a = tripConnectionKey([180.01, 22], [179.99, 22], 'https://source.example/private-token');
@@ -25,6 +27,22 @@ test('the itinerary accepts every connection beyond the former 200 and 500 task 
   assert.equal(queue.snapshot().total, 1200);
   assert.equal(queue.serialize().tasks.length, 1200);
   assert.equal(queue.next(['task-1199'])?.key, 'task-1199');
+});
+
+test('optional short-first scheduling gives nearby work priority without changing selection scope or paused states', () => {
+  const queue = new TripQueue();
+  queue.reconcile([
+    { ...connection('long'), to: [114.2, 22] },
+    connection('nearby'), connection('tie'),
+    { ...connection('hidden'), to: [114.001, 22] },
+  ]);
+  assert.equal(queue.next(['long', 'nearby', 'tie'])?.key, 'long');
+  assert.equal(queue.next(['long', 'nearby', 'tie'], true)?.key, 'nearby');
+  queue.pause('nearby', 'User paused.');
+  assert.equal(queue.next(['long', 'nearby', 'tie'], true)?.key, 'tie');
+  queue.finish('tie', 'unavailable');
+  assert.equal(queue.next(['long', 'nearby', 'tie'], true)?.key, 'long');
+  assert.equal(queue.status('nearby')?.state, 'paused');
 });
 
 test('reconciling a view preserves completed work and tasks belonging to other views', () => {
@@ -431,4 +449,221 @@ test('invalid distance previous metadata cannot create a state or persist unsafe
   assert.equal(invalidReason.get('a')?.distancePreviousReason, undefined);
   invalidReason.restoreDirect('a');
   assert.equal(invalidReason.get('a')?.state, 'paused');
+});
+
+test('split checkpoints persist completed path prefixes while only temporary area progress replays after reload', () => {
+  let saves = 0;
+  const queue = new TripQueue(undefined, () => saves++);
+  queue.reconcile([connection('active'), connection('paused')]);
+  assert.equal(queue.setSplit('active', splitProgress()), false);
+  queue.start('active'); queue.checkpoint('active', 1);
+  assert.equal(queue.setSplit('active', splitProgress()), true);
+  const saved = saves;
+  assert.equal(queue.setSplit('active', splitProgress()), true);
+  assert.equal(saves, saved);
+  queue.start('paused'); queue.setSplit('paused', splitProgress()); queue.pause('paused', 'User paused.');
+  const reopened = new TripQueue(JSON.parse(JSON.stringify(queue.serialize())));
+  assert.equal(reopened.get('active')?.state, 'queued');
+  assert.equal(reopened.get('active')?.nextArea, 0);
+  assert.deepEqual(reopened.get('active')?.split, splitProgress());
+  assert.equal(reopened.get('paused')?.state, 'paused');
+  reopened.resume('paused');
+  assert.equal(reopened.get('paused')?.state, 'queued');
+  assert.deepEqual(reopened.get('paused')?.split, splitProgress());
+});
+
+test('split checkpoint input, returned task, serialization and loaded checkpoints are defensive deep copies', () => {
+  const queue = new TripQueue(); queue.reconcile([connection('a')]); queue.start('a');
+  const initial = splitProgress(); queue.setSplit('a', initial);
+  initial.frontier[0].anchor.point[0] = 0;
+  initial.frontier[0].route.coordinates[0][0] = 0;
+  const read = queue.get('a')!; read.split!.frontier[0].anchor.point[0] = 0;
+  read.split!.frontier[0].route.coordinates[1][0] = 0;
+  const stored = queue.serialize();
+  const reopened = new TripQueue(stored);
+  stored.tasks[0].split!.frontier[0].anchor.point[0] = 0;
+  stored.tasks[0].split!.frontier[0].route.coordinates[0][0] = 0;
+  assert.deepEqual(queue.get('a')?.split, splitProgress());
+  assert.deepEqual(reopened.get('a')?.split, splitProgress());
+  const next = reopened.next()!; next.split!.frontier[0].anchor.point[0] = 0;
+  assert.deepEqual(reopened.get('a')?.split, splitProgress());
+});
+
+test('split checkpoints validate versions, passes, cursors, frontier bounds, finite anchors and connected seams', () => {
+  const queue = new TripQueue(); queue.reconcile([connection('a')]); queue.start('a');
+  const valid = splitProgress();
+  const candidates: unknown[] = [null, {}, { ...valid, version: 2 }, { ...valid, pass: -1 }, { ...valid, pass: 3 },
+    { ...valid, pass: 0.5 }, { ...valid, nextPart: -1 }, { ...valid, nextPart: 5 }, { ...valid, nextPart: NaN },
+    { ...valid, nextPart: 1.5 }, { ...valid, totalParts: Infinity }, { ...valid, totalParts: Number.MAX_SAFE_INTEGER + 1 },
+    { ...valid, frontier: [] }, { ...valid, frontier: Array(1) }, { ...valid, frontier: Array(13).fill(valid.frontier[0]) },
+    { ...valid, frontier: [null] }, { ...valid, frontier: [{ ...valid.frontier[0], anchor: null }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], anchor: { point: [114.01, NaN], grade: 'ground|0|0' } }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], anchor: { point: [114.01, 91], grade: 'ground|0|0' } }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], anchor: { point: [114.01, 22], grade: '' } }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], anchor: { point: [114.01, 22], grade: 'x'.repeat(257) } }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], anchor: { point: [114.01001, 22], grade: 'ground|0|0' } }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], route: { ...route, distance: -1 } }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], route: { ...route, coordinates: [[114.01, 22]] } }] },
+    { ...valid, frontier: [{ ...valid.frontier[0], route: { ...route, coordinates: Array(2) } }] },
+  ];
+  for (const invalid of candidates) {
+    assert.equal(queue.setSplit('a', invalid as TripSplitProgress), false);
+    const stored = queue.serialize();
+    (stored.tasks[0] as unknown as Record<string, unknown>).split = invalid;
+    const reopened = new TripQueue(stored);
+    assert.equal(reopened.get('a')?.state, 'queued');
+    assert.equal(reopened.get('a')?.split, undefined);
+  }
+  assert.equal(queue.setSplit('a', { ...valid, pass: 0, nextPart: 0, totalParts: 0, frontier: [] }), true);
+  const close = splitProgress(); close.frontier[0].anchor.point[1] += 0.0000001;
+  assert.equal(queue.setSplit('a', close), true);
+  assert.equal(queue.setSplit('a', { ...valid, pass: 2, nextPart: 4, frontier: Array(12).fill(valid.frontier[0]) }), true);
+  for (const bearing of [-1, 181, NaN, Infinity, null, '0']) {
+    const invalid = structuredClone(valid) as unknown as { frontier: Array<{ anchor: Record<string, unknown> }> };
+    invalid.frontier[0].anchor.bearing = bearing;
+    assert.equal(queue.setSplit('a', invalid as unknown as TripSplitProgress), false);
+    const stored = queue.serialize();
+    (stored.tasks[0] as unknown as Record<string, unknown>).split = invalid;
+    assert.equal(new TripQueue(stored).get('a')?.split, undefined);
+  }
+  for (const bearing of [0, 45, 180]) {
+    const withBearing = splitProgress(); withBearing.frontier[0].anchor.bearing = bearing;
+    assert.equal(queue.setSplit('a', withBearing), true);
+    withBearing.frontier[0].anchor.bearing = 90;
+    assert.equal(queue.get('a')?.split?.frontier[0].anchor.bearing, bearing);
+    assert.equal(new TripQueue(queue.serialize()).get('a')?.split?.frontier[0].anchor.bearing, bearing);
+  }
+});
+
+test('automatic interrupted requeue retains split paths and never resurrects an explicit pause or terminal task', () => {
+  const queue = new TripQueue(); queue.reconcile(['a', 'paused', 'ready', 'direct'].map(connection));
+  queue.start('a'); queue.setSplit('a', splitProgress()); queue.checkpoint('a', 1);
+  assert.equal(queue.requeue('a'), true);
+  assert.equal(queue.get('a')?.state, 'queued');
+  assert.equal(queue.get('a')?.nextArea, 0);
+  assert.deepEqual(queue.get('a')?.split, splitProgress());
+  queue.start('paused'); queue.setSplit('paused', splitProgress()); queue.pause('paused', 'User paused.');
+  queue.finish('ready', 'ready', undefined, route); queue.setDirect('direct');
+  for (const key of ['paused', 'ready', 'direct', 'missing']) assert.equal(queue.requeue(key), false);
+  assert.equal(queue.get('paused')?.state, 'paused');
+  assert.deepEqual(queue.get('paused')?.split, splitProgress());
+});
+
+test('explicit retries discard split checkpoints, while all terminal outcomes release their intermediate paths', () => {
+  const queue = new TripQueue(); queue.reconcile(['queued', 'ready', 'no-path', 'unavailable'].map(connection));
+  for (const key of ['queued', 'ready', 'no-path', 'unavailable']) { queue.start(key); queue.setSplit(key, splitProgress()); }
+  queue.requeue('queued');
+  assert.equal(queue.retry('queued'), true);
+  assert.equal(queue.get('queued')?.split, undefined);
+  for (const state of ['ready', 'no-path', 'unavailable'] as const) {
+    assert.equal(queue.finish(state, state, undefined, state === 'ready' ? route : undefined), true);
+    assert.equal(queue.get(state)?.split, undefined);
+    assert.equal(queue.setSplit(state, splitProgress()), false);
+  }
+});
+
+test('distance exclusion and restoration retain split checkpoints and preserve an explicit user pause', () => {
+  const queue = new TripQueue(); queue.reconcile(['active', 'paused'].map(connection));
+  for (const key of ['active', 'paused']) { queue.start(key); queue.setSplit(key, splitProgress()); }
+  queue.pause('paused', 'User paused.');
+  queue.setDirect('active'); queue.setDirect('paused');
+  const reopened = new TripQueue(queue.serialize());
+  assert.equal(reopened.setSplit('active', splitProgress()), false);
+  reopened.restoreDirect('active'); reopened.restoreDirect('paused');
+  assert.equal(reopened.get('active')?.state, 'queued');
+  assert.deepEqual(reopened.get('active')?.split, splitProgress());
+  assert.equal(reopened.get('paused')?.state, 'paused');
+  assert.equal(reopened.get('paused')?.reason, 'User paused.');
+  assert.deepEqual(reopened.get('paused')?.split, splitProgress());
+  assert.equal(reopened.upgradeBudgetPauses(), 0);
+});
+
+test('legacy budget migration upgrades only exact known resource pauses and initializes the split strategy once', () => {
+  let saves = 0;
+  const queue = new TripQueue(undefined, () => saves++, () => 123);
+  const reasons = [
+    'Working data limit in Eco. Select a larger workload mode and Resume.',
+    'Working data limit in Balanced. Select a larger workload mode and Resume.',
+    'Working data limit in Maximum. This connection needs a different search strategy or regional routing data; progress is saved.',
+    'User paused. Resume continues pending connections.',
+    'Paused by user.',
+    'The local search could not finish within the working budget. Resume or select a larger workload mode.',
+    'Chunk loading time limit reached. Resume retries this connection; previous results are saved.',
+    'Working data limit in Eco. Select a larger workload mode and Resume. Extra detail.',
+  ];
+  queue.reconcile(reasons.map((_reason, index) => connection(`pause-${index}`)));
+  reasons.forEach((reason, index) => { queue.start(`pause-${index}`); queue.checkpoint(`pause-${index}`, 1); queue.pause(`pause-${index}`, reason); });
+  const before = saves;
+  assert.equal(queue.upgradeBudgetPauses(['pause-0', 'pause-0', 'missing']), 1);
+  assert.equal(saves, before + 1);
+  assert.equal(queue.upgradeBudgetPauses(), 2);
+  for (let index = 0; index < 3; index++) {
+    const task = queue.get(`pause-${index}`)!;
+    assert.equal(task.state, 'queued'); assert.equal(task.nextArea, 0); assert.equal(task.updatedAt, 123);
+    assert.equal(task.reason, undefined);
+    assert.deepEqual(task.split, { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [] });
+  }
+  for (let index = 3; index < reasons.length; index++) assert.equal(queue.get(`pause-${index}`)?.state, 'paused');
+  queue.pause('pause-0', reasons[0]);
+  const reopened = new TripQueue(queue.serialize());
+  assert.equal(reopened.upgradeBudgetPauses(), 0);
+  assert.equal(reopened.get('pause-0')?.state, 'paused');
+  assert.deepEqual(reopened.get('pause-0')?.split, { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [] });
+});
+
+test('legacy budget migration leaves distance exclusions untouched until restored and never restarts terminal outcomes', () => {
+  const reason = 'Working data limit in Eco. Select a larger workload mode and Resume.';
+  const queue = new TripQueue(); queue.reconcile(['direct', 'ready', 'unavailable', 'no-path'].map(connection));
+  queue.pause('direct', reason); queue.setDirect('direct');
+  queue.finish('ready', 'ready', reason, route); queue.finish('unavailable', 'unavailable', reason); queue.finish('no-path', 'no-path', reason);
+  const reopened = new TripQueue(queue.serialize());
+  assert.equal(reopened.upgradeBudgetPauses(), 0);
+  assert.equal(reopened.get('direct')?.state, 'direct');
+  reopened.restoreDirect('direct');
+  assert.equal(reopened.get('direct')?.state, 'paused');
+  assert.equal(reopened.upgradeBudgetPauses(), 1);
+  assert.equal(reopened.get('direct')?.state, 'queued');
+  assert.equal(reopened.snapshot().processed, 3);
+});
+
+test('changing pin access retries unresolved outcomes and active split prefixes while retaining saved paths and pauses', () => {
+  const queue = new TripQueue();
+  queue.reconcile(['ready', 'direct', 'user-paused', 'error-paused', 'no-path', 'unavailable', 'queued-split', 'preparing-split', 'queued', 'preparing'].map(connection));
+  queue.finish('ready', 'ready', 'Saved.', route);
+  queue.finish('direct', 'unavailable', 'Previous result.'); queue.setDirect('direct');
+  queue.start('user-paused'); queue.setSplit('user-paused', splitProgress()); queue.pause('user-paused', 'User paused.');
+  queue.pause('error-paused', 'Unexpected local failure.');
+  queue.finish('no-path', 'no-path', 'No connected route.'); queue.finish('unavailable', 'unavailable', 'Map detail missing.');
+  queue.start('queued-split'); queue.setSplit('queued-split', splitProgress()); queue.requeue('queued-split');
+  queue.start('preparing-split'); queue.setSplit('preparing-split', splitProgress());
+  queue.start('preparing'); queue.checkpoint('preparing', 1);
+  const preserved = ['ready', 'direct', 'user-paused', 'error-paused', 'queued', 'preparing'].map(key => queue.get(key));
+  assert.equal(queue.restartAccessSearches(), 4);
+  for (const key of ['no-path', 'unavailable', 'queued-split', 'preparing-split']) {
+    const task = queue.get(key)!;
+    assert.equal(task.state, 'queued'); assert.equal(task.nextArea, 0);
+    assert.equal(task.split, undefined); assert.equal(task.reason, undefined); assert.equal(task.route, undefined);
+  }
+  assert.deepEqual(['ready', 'direct', 'user-paused', 'error-paused', 'queued', 'preparing'].map(key => queue.get(key)), preserved);
+  assert.equal(queue.restartAccessSearches(), 0);
+  assert.deepEqual(queue.get('ready')?.route, route);
+  assert.deepEqual(queue.get('user-paused')?.split, splitProgress());
+});
+
+test('access retries are durable, idempotent and avoid task deep copies during the scan', () => {
+  let saves = 0;
+  const queue = new TripQueue(undefined, () => saves++);
+  queue.reconcile([connection('missing'), connection('prefix'), connection('other')]);
+  queue.finish('missing', 'unavailable'); queue.start('prefix'); queue.setSplit('prefix', splitProgress());
+  queue.get = () => { throw Error('Retry scanning must not deep-copy stored routes.'); };
+  const before = saves;
+  assert.equal(queue.restartAccessSearches(), 2);
+  assert.equal(saves, before + 2);
+  assert.equal(queue.restartAccessSearches(), 0);
+  assert.equal(saves, before + 2);
+  const restored = new TripQueue(queue.serialize());
+  assert.equal(restored.get('missing')?.state, 'queued');
+  assert.equal(restored.get('prefix')?.state, 'queued');
+  assert.equal(restored.get('prefix')?.split, undefined);
+  assert.equal(restored.restartAccessSearches(), 0);
 });

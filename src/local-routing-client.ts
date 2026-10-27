@@ -4,7 +4,7 @@ import type { RoutingJob, RoutingResult } from './routing-protocol';
 declare const __LOCAL_ROUTING_WORKER__: string;
 
 export interface RoutingClient {
-  route(snapshot: RoadSnapshot, legs: RoutingJob['legs']): Promise<RoutingResult>;
+  route(snapshot: RoadSnapshot, legs: RoutingJob['legs'], gate?: RoutingJob['gate']): Promise<RoutingResult>;
   cancel(): void;
   configure?(timeoutMs: number): void;
 }
@@ -21,7 +21,7 @@ export class LocalRoutingClient implements RoutingClient {
   }
   private pending: { id: number; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
-  async route(snapshot: RoadSnapshot, legs: RoutingJob['legs']): Promise<RoutingResult> {
+  async route(snapshot: RoadSnapshot, legs: RoutingJob['legs'], gate?: RoutingJob['gate']): Promise<RoutingResult> {
     if (this.pending) this.cancel();
     if (!this.worker) {
       this.workerUrl = URL.createObjectURL(new Blob([__LOCAL_ROUTING_WORKER__], { type: 'text/javascript' }));
@@ -41,7 +41,7 @@ export class LocalRoutingClient implements RoutingClient {
         else resolve(event.data);
       };
       worker.onerror = () => { if (this.worker === worker) this.cancel(); };
-      try { worker.postMessage({ id, graphKey: snapshot.key, features: snapshot.features, legs } satisfies RoutingJob); }
+      try { worker.postMessage({ id, graphKey: snapshot.key, features: snapshot.features, legs, ...(gate ? { gate } : {}) } satisfies RoutingJob); }
       catch { this.cancel(); }
     });
   }

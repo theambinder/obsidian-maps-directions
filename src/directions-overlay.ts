@@ -415,6 +415,7 @@ export class DirectionsOverlay implements OverlayLike {
       const route = task?.state === 'ready' ? task.route : this.routeCache.get(routeKey);
       if (route) { this.retainedRoutes.set(routeKey, route); if (task?.state !== 'ready') ledger.finish(key, 'ready', 'Restored saved path.', route); }
     });
+    if (readOptions(this.view.config).autoPrepare) ledger.upgradeBudgetPauses(this.smartKeys);
     const result = applyRoadRoutes(direct, { id: 0, routes: this.smartRouteKeys.map(key => this.retainedRoutes.get(key) ?? null), stats: { nodes: 0, edges: 0, truncated: false } });
     result.features = result.features.map(feature => feature.properties.connectionKind === 'fallback' && intentionalStraight.has(routeKey(feature)) ? { ...feature, properties: { ...feature.properties, connectionKind: 'direct' } } : feature);
     this.routedData = result;
@@ -467,7 +468,7 @@ export class DirectionsOverlay implements OverlayLike {
         run: this.preparationServices.run, visible: () => !automatic || this.mapVisible(map), maxDistanceKm: () => this.currentWorkload().maxDistanceKm,
         onProgress: progress => {
           if (this.destroyed || controller.signal.aborted || this.preparationController !== controller) return;
-          this.preparationProgress = { running: true, completed: progress.completed, total: progress.total, message: progress.message };
+          this.preparationProgress = { running: true, completed: progress.completed, total: progress.total, message: progress.message, unit: progress.unit };
           this.update();
         },
         onRoute: (key, route) => {
@@ -482,7 +483,7 @@ export class DirectionsOverlay implements OverlayLike {
       });
       if (!controller.signal.aborted) {
         const progress = ledger.snapshot(this.smartKeys);
-        this.preparationProgress = { running: false, completed: 0, total: 0, message: progress.paused ? `${progress.paused} connections paused. Open Why dashed lines? for the reason, choose a larger workload if needed, then Resume.` : 'Queue processing finished. Results and progress are saved.' };
+        this.preparationProgress = { running: false, completed: 0, total: 0, message: progress.paused ? `${progress.paused} connections paused. Open Why dashed lines? for the reason; Resume continues them. Resource-limited connections automatically use smaller sections.` : 'Queue processing finished. Results and progress are saved.' };
       }
     } catch {
       if (!controller.signal.aborted) this.preparationProgress = { running: false, completed: 0, total: 0, message: 'Queue interrupted. Completed connections are saved.' };

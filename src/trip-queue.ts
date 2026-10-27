@@ -1,10 +1,18 @@
 import { autoPreparationKey } from './auto-preparation';
-import { roadDistance, type RoadCoordinate, type RoadRoute } from './road-graph';
+import { roadDistance, type RoadCoordinate, type RoadRoute, type RoadAnchor } from './road-graph';
 
 export type TripTaskState = 'queued' | 'preparing' | 'ready' | 'no-path' | 'unavailable' | 'paused' | 'direct';
 export type TripTaskResult = 'ready' | 'no-path' | 'unavailable';
 export interface TripArea { center: RoadCoordinate; zoom: number; stage: 'overview' | 'corridor' | 'endpoint' }
 export interface TripConnection { key: string; from: RoadCoordinate; to: RoadCoordinate; areas: TripArea[] }
+export interface TripSplitPath { anchor: RoadAnchor; route: RoadRoute }
+export interface TripSplitProgress {
+  version: 1;
+  pass: number;
+  nextPart: number;
+  totalParts: number;
+  frontier: TripSplitPath[];
+}
 export interface TripTask extends TripConnection {
   state: TripTaskState;
   nextArea: number;
@@ -14,6 +22,8 @@ export interface TripTask extends TripConnection {
   restarted?: boolean;
   /** Durable path geometry prevents a small opportunistic cache from evicting trip results. */
   route?: RoadRoute;
+  /** Compact completed prefixes survive reloads without retaining the temporary road graph. */
+  split?: TripSplitProgress;
   /** Outcome restored when the distance policy later makes this connection eligible. */
   distancePreviousState?: Exclude<TripTaskState, 'direct'>;
   distancePreviousReason?: string;
@@ -54,12 +64,32 @@ const project = ([longitude, latitude]: RoadCoordinate): RoadCoordinate => [long
 const unproject = ([x, y]: RoadCoordinate): RoadCoordinate => [normalize(x / EARTH / RAD), (2 * Math.atan(Math.exp(y / EARTH)) - Math.PI / 2) / RAD];
 const cloneArea = (area: TripArea): TripArea => ({ center: [...area.center], zoom: area.zoom, stage: area.stage });
 const cloneRoute = (route: RoadRoute): RoadRoute => ({ distance: route.distance, coordinates: route.coordinates.map(coordinate => [...coordinate]) });
-const cloneTask = (task: TripTask): TripTask => ({ ...task, from: [...task.from], to: [...task.to], areas: task.areas.map(cloneArea), ...(task.route ? { route: cloneRoute(task.route) } : {}) });
+const cloneSplit = (split: TripSplitProgress): TripSplitProgress => ({
+  version: 1, pass: split.pass, nextPart: split.nextPart, totalParts: split.totalParts,
+  frontier: split.frontier.map(path => ({ anchor: { point: [...path.anchor.point], grade: path.anchor.grade,
+    ...(path.anchor.bearing !== undefined ? { bearing: path.anchor.bearing } : {}) }, route: cloneRoute(path.route) })),
+});
+const cloneTask = (task: TripTask): TripTask => ({ ...task, from: [...task.from], to: [...task.to], areas: task.areas.map(cloneArea), ...(task.route ? { route: cloneRoute(task.route) } : {}), ...(task.split ? { split: cloneSplit(task.split) } : {}) });
 const validRoute = (value: unknown): value is RoadRoute => {
   if (!value || typeof value !== 'object') return false;
   const route = value as Partial<RoadRoute>;
   return typeof route.distance === 'number' && Number.isFinite(route.distance) && route.distance >= 0 &&
-    Array.isArray(route.coordinates) && route.coordinates.length >= 2 && route.coordinates.every(point);
+    Array.isArray(route.coordinates) && route.coordinates.length >= 2 && Array.from(route.coordinates).every(point);
+};
+const validSplit = (value: unknown): value is TripSplitProgress => {
+  if (!value || typeof value !== 'object') return false;
+  const split = value as Partial<TripSplitProgress>;
+  if (split.version !== 1 || !Number.isInteger(split.pass) || split.pass! < 0 || split.pass! > 2 ||
+    !Number.isSafeInteger(split.nextPart) || split.nextPart! < 0 || !Number.isSafeInteger(split.totalParts) ||
+    split.totalParts! < 0 || split.nextPart! > split.totalParts! || !Array.isArray(split.frontier) ||
+    split.frontier.length > 12 || split.nextPart! > 0 && split.frontier.length === 0) return false;
+  return Array.from(split.frontier).every(path => {
+    if (!path || typeof path !== 'object' || !path.anchor || typeof path.anchor !== 'object') return false;
+    const { anchor, route } = path;
+    return point(anchor.point) && typeof anchor.grade === 'string' && anchor.grade.length > 0 && anchor.grade.length <= 256 &&
+      (anchor.bearing === undefined || typeof anchor.bearing === 'number' && Number.isFinite(anchor.bearing) && anchor.bearing >= 0 && anchor.bearing <= 180) &&
+      validRoute(route) && roadDistance(route.coordinates[route.coordinates.length - 1], anchor.point) <= 0.1;
+  });
 };
 const validArea = (value: unknown): value is TripArea => {
   if (!value || typeof value !== 'object') return false;
@@ -74,6 +104,11 @@ const validConnection = (value: unknown): value is TripConnection => {
 };
 const samePoint = (a: RoadCoordinate, b: RoadCoordinate): boolean => normalize(a[0]) === normalize(b[0]) && a[1] === b[1];
 const reasonText = (value: unknown): string | undefined => typeof value === 'string' && value.length <= 500 ? value : undefined;
+const LEGACY_BUDGET_REASONS = new Set([
+  'Working data limit in Eco. Select a larger workload mode and Resume.',
+  'Working data limit in Balanced. Select a larger workload mode and Resume.',
+  'Working data limit in Maximum. This connection needs a different search strategy or regional routing data; progress is saved.',
+]);
 
 /** Endpoints are ordered; source configuration is hashed rather than saved as a URL. */
 export function tripConnectionKey(from: RoadCoordinate, to: RoadCoordinate, sourceContext: string): string {
@@ -105,8 +140,8 @@ export class TripQueue {
       if (!validConnection(original) || !STATES.has(original.state) || typeof original.updatedAt !== 'number' ||
         !Number.isFinite(original.updatedAt) || original.updatedAt < 0 || !Number.isInteger(original.nextArea) ||
         original.nextArea < 0 || original.nextArea > original.areas.length) continue;
-      const { route: rawRoute, ...metadata } = original;
-      const task = cloneTask({ ...metadata, ...(validRoute(rawRoute) ? { route: rawRoute } : {}) });
+      const { route: rawRoute, split: rawSplit, ...metadata } = original;
+      const task = cloneTask({ ...metadata, ...(validRoute(rawRoute) ? { route: rawRoute } : {}), ...(validSplit(rawSplit) ? { split: rawSplit } : {}) });
       if (task.state === 'ready' && !task.route) { task.state = 'queued'; task.nextArea = 0; task.reason = 'Saved route data unavailable.'; }
       task.from = cleanPoint(task.from); task.to = cleanPoint(task.to);
       task.reason = reasonText(task.reason);
@@ -151,9 +186,15 @@ export class TripQueue {
   }
 
   get(key: string): TripTask | undefined { const task = this.tasks.get(key); return task ? cloneTask(task) : undefined; }
-  next(keys?: readonly string[]): TripTask | null {
-    for (const task of this.selected(keys)) if (task.state === 'queued') return cloneTask(task);
-    return null;
+  next(keys?: readonly string[], shortestFirst = false): TripTask | null {
+    let selected: TripTask | null = null, distance = Infinity;
+    for (const task of this.selected(keys)) {
+      if (task.state !== 'queued') continue;
+      if (!shortestFirst) return cloneTask(task);
+      const length = roadDistance(task.from, task.to);
+      if (length < distance) { distance = length; selected = task; }
+    }
+    return selected ? cloneTask(selected) : null;
   }
   start(key: string): boolean {
     const task = this.tasks.get(key);
@@ -167,6 +208,15 @@ export class TripQueue {
     if (task.nextArea !== nextArea) { task.nextArea = nextArea; this.changed(task); }
     return true;
   }
+  /** Save only validated paths to exact road anchors; raw temporary roads stay in memory. */
+  setSplit(key: string, progress: TripSplitProgress): boolean {
+    const task = this.tasks.get(key);
+    if (!task || task.state !== 'preparing' || !validSplit(progress)) return false;
+    const next = cloneSplit(progress);
+    if (task.split && JSON.stringify(task.split) === JSON.stringify(next)) return true;
+    task.split = next;
+    this.changed(task); return true;
+  }
   /** Replace an oversized area with smaller overlapping children, keeping its position. */
   replaceArea(key: string, index: number, areas: readonly TripArea[]): boolean {
     const task = this.tasks.get(key);
@@ -179,9 +229,10 @@ export class TripQueue {
     const text = reasonText(reason);
     const sameRoute = route === undefined || task.route !== undefined && route.distance === task.route.distance &&
       route.coordinates.length === task.route.coordinates.length && route.coordinates.every((coordinate, index) => coordinate[0] === task.route!.coordinates[index][0] && coordinate[1] === task.route!.coordinates[index][1]);
-    if (task.state === state && task.reason === text && sameRoute) return true;
+    if (task.state === state && task.reason === text && sameRoute && !task.split) return true;
     task.state = state; task.reason = text; task.restarted = false;
     task.route = state === 'ready' ? route ? cloneRoute(route) : task.route : undefined;
+    delete task.split;
     this.changed(task); return true;
   }
   /** Keep previously computed geometry so increasing the limit can restore it without new loading. */
@@ -232,13 +283,45 @@ export class TripQueue {
     }
     if (changed) this.onChange();
   }
+  /** An interruption retains completed split prefixes; explicit user pauses remain paused. */
+  requeue(key: string): boolean {
+    const task = this.tasks.get(key);
+    if (!task || task.state !== 'preparing' && task.state !== 'queued') return false;
+    if (task.state === 'queued' && task.nextArea === 0 && !task.reason) return true;
+    task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.restarted = true;
+    this.changed(task); return true;
+  }
+  /** Upgrade only known legacy resource pauses, once, to the new bounded split strategy. */
+  upgradeBudgetPauses(keys?: readonly string[]): number {
+    let upgraded = 0;
+    for (const task of this.selected(keys)) {
+      if (task.state !== 'paused' || task.split || !task.reason || !LEGACY_BUDGET_REASONS.has(task.reason)) continue;
+      task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.restarted = true;
+      task.split = { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [] };
+      task.updatedAt = this.now(); upgraded++;
+    }
+    if (upgraded) this.onChange();
+    return upgraded;
+  }
   retry(key: string): boolean {
     const task = this.tasks.get(key);
     if (!task || task.state === 'direct') return false;
-    if (task.state === 'queued' && task.nextArea === 0 && !task.reason) return true;
+    if (task.state === 'queued' && task.nextArea === 0 && !task.reason && !task.split && !task.route) return true;
     task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.route = undefined; task.restarted = true;
     delete task.distancePreviousState; delete task.distancePreviousReason;
+    delete task.split;
     this.changed(task); return true;
+  }
+  /** A changed pin-access allowance invalidates unresolved outcomes and active saved prefixes. */
+  restartAccessSearches(): number {
+    let restarted = 0;
+    for (const task of this.tasks.values()) {
+      if (task.state === 'no-path' || task.state === 'unavailable' ||
+        (task.state === 'queued' || task.state === 'preparing') && task.split) {
+        if (this.retry(task.key)) restarted++;
+      }
+    }
+    return restarted;
   }
   snapshot(keys?: readonly string[]): TripQueueSnapshot {
     const result: TripQueueSnapshot = { total: 0, processed: 0, ready: 0, noPath: 0, unavailable: 0, paused: 0, queued: 0, preparing: 0, percentComplete: 100, percentRemaining: 0, areasProcessed: 0, areasTotal: 0, direct: 0, eligible: 0 };

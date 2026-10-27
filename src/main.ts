@@ -38,7 +38,10 @@ export default class MapsDirectionsPlugin extends Plugin {
     this.tripQueue = new TripQueue(stored.tripQueue, () => this.scheduleCacheSave());
     this.workload = readWorkloadSettings(stored.workload);
     this.addSettingTab(new MapsDirectionsSettingTab(this.app, this, () => this.workload, async value => {
-      this.workload = readWorkloadSettings(value); this.saveCache(); this.adapter.workloadChanged();
+      const previousAccess = this.workload.maxAccessMeters;
+      this.workload = readWorkloadSettings(value);
+      if (previousAccess !== this.workload.maxAccessMeters) this.tripQueue.restartAccessSearches();
+      this.saveCache(); this.adapter.workloadChanged();
     }, () => this.storage.snapshot(), () => this.sharedCache.snapshot()));
     this.adapter = new MapsAdapter(
       this.app,

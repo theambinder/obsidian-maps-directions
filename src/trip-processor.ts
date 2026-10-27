@@ -1,13 +1,15 @@
 import type { MapLike } from './contracts';
-import { prepareBackgroundRoads, type BackgroundMapFactory } from './background-roads';
+import { buildRoadPreparationStyle, prepareBackgroundRoads, type BackgroundMapFactory } from './background-roads';
 import { PreparationQueue } from './auto-preparation';
 import { DetailedRoadMemory } from './detailed-road-memory';
 import type { RoutingClient } from './local-routing-client';
 import type { RoadRoute } from './routing-protocol';
-import { exceedsRoadDistance, roadDistanceLimitReason, planTripConnection, subdivideTripArea, TripQueue } from './trip-queue';
+import { exceedsRoadDistance, roadDistanceLimitReason, planTripConnection, subdivideTripArea, tripConnectionKey, TripQueue } from './trip-queue';
+import { roadDistance } from './road-graph';
 import type { WorkloadProfile } from './workload-settings';
+import { processSplitTrip } from './segmented-trip';
 
-export interface TripProcessorProgress { key: string; completed: number; total: number; message: string }
+export interface TripProcessorProgress { key: string; completed: number; total: number; message: string; unit?: 'areas' | 'sections' }
 export interface TripProcessorOptions {
   original: MapLike;
   keys: readonly string[];
@@ -25,10 +27,6 @@ export interface TripProcessorOptions {
   maxDistanceKm?: number | null | (() => number | null);
 }
 
-function workingLimit(profile: WorkloadProfile): string {
-  return profile.mode === 'maximum' ? 'Working data limit in Maximum. This connection needs a different search strategy or regional routing data; progress is saved.' : `Working data limit in ${profile.label}. Select a larger workload mode and Resume.`;
-}
-
 function abortError(): Error { const error = new Error('Trip preparation paused.'); error.name = 'AbortError'; return error; }
 export function tripPause(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(abortError());
@@ -42,6 +40,7 @@ export function tripPause(ms: number, signal: AbortSignal): Promise<void> {
 /** Each connection owns a temporary road network. Finished geometry is durable. */
 export async function processTripQueue(options: TripProcessorOptions): Promise<void> {
   const { ledger, client, signal } = options;
+  const sourceContext = JSON.stringify(buildRoadPreparationStyle(options.original.getStyle?.()));
   let activeKey: string | null = null;
   const distanceLimit = (): number | null | undefined => typeof options.maxDistanceKm === 'function' ? options.maxDistanceKm() : options.maxDistanceKm;
   const directIfOverLimit = (task: { key: string; from: [number, number]; to: [number, number] }): boolean => {
@@ -55,17 +54,34 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
   signal.addEventListener('abort', stopWorker, { once: true });
   try {
     while (!signal.aborted) {
-      const task = ledger.next(options.keys);
+      const task = ledger.next(options.keys, true);
       if (!task) break;
       if (directIfOverLimit(task)) continue;
+      // This walking graph is undirected. Reuse only the same source and permitted pin access.
+      const reversed = ledger.get(tripConnectionKey(task.to, task.from, sourceContext));
+      const saved = reversed?.state === 'ready' ? reversed.route : undefined;
+      const access = options.profile().maxAccessMeters;
+      if (saved && roadDistance(task.from, saved.coordinates[saved.coordinates.length - 1]) <= access &&
+        roadDistance(task.to, saved.coordinates[0]) <= access) {
+        const route: RoadRoute = { distance: saved.distance, coordinates: saved.coordinates.reverse() };
+        if (ledger.finish(task.key, 'ready', 'Reused the reverse of a saved walking path from the same map source.', route)) options.onRoute?.(task.key, route);
+        continue;
+      }
       if (options.visible && !options.visible()) throw abortError();
       if (!ledger.start(task.key)) continue;
       activeKey = task.key;
+      if (task.split) {
+        await processSplitTrip(options, task.key, () => !directIfOverLimit(task));
+        if (signal.aborted) throw abortError();
+        activeKey = null;
+        if (ledger.next(options.keys) && options.profile().pauseMs > 0) await tripPause(options.profile().pauseMs, signal);
+        continue;
+      }
       const profile = options.profile();
       client.configure?.(profile.workerTimeoutMs);
       const memory = new DetailedRoadMemory({ features: profile.maxRoadFeatures, positions: profile.maxRoadPositions });
       const detailedCoverage = planTripConnection(task.from, task.to).detailedCoverage;
-      let readyAreas = 0, unavailableAreas = 0, found = false, workerLimited = false;
+      let readyAreas = 0, unavailableAreas = 0, found = false, workerLimited = false, useSmallerSections = false;
       try {
         while (!signal.aborted) {
           const current = ledger.get(task.key);
@@ -96,7 +112,7 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
                   if (target?.zoom < 14) { unavailableAreas++; return true; }
                   const children = target && target.zoom < 16 ? subdivideTripArea(target) : [];
                   if (children.length && ledger.replaceArea(task.key, index, children)) subdivided = true;
-                  else { workingLimited = true; ledger.pause(task.key, workingLimit(profile)); }
+                  else { workingLimited = true; useSmallerSections = true; }
                   return false;
                 }
                 if (snapshot.state !== 'ready') { unavailableAreas++; return true; }
@@ -106,7 +122,7 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
                 const stop = (): void => client.cancel();
                 chunkSignal.addEventListener('abort', stop, { once: true });
                 try {
-                  const result = await client.route(roads, [{ from: task.from, to: task.to }]);
+                  const result = await client.route(roads, [{ from: task.from, to: task.to, maxSnapMeters: profile.maxAccessMeters }]);
                   if (signal.aborted || chunkSignal.aborted || ledger.get(task.key)?.state !== 'preparing') return false;
                   if (directIfOverLimit(task)) return false;
                   const route = result.routes[0];
@@ -139,16 +155,23 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
         if (signal.aborted) throw abortError();
         const final = ledger.get(task.key);
         if (final?.state === 'preparing') {
-          if (workerLimited || memory.stats().evicted) ledger.pause(task.key, workingLimit(profile));
+          if (workerLimited || memory.stats().evicted) useSmallerSections = true;
+          else if (useSmallerSections) { /* Continue below after releasing the whole-connection graph. */ }
           else if (!detailedCoverage) ledger.finish(task.key, 'unavailable', 'The regional connection was checked at coarse map detail. A complete regional routing graph is required to resolve it.');
           else if (!readyAreas || unavailableAreas) ledger.finish(task.key, 'unavailable', 'Some required detailed road areas were unavailable. Retry when map data is available.');
           else ledger.finish(task.key, 'no-path', 'No connected walking path was found in the checked road data.');
         }
       } catch (error) {
         if (signal.aborted || options.visible && !options.visible()) throw error;
-        ledger.pause(task.key, 'The local search could not finish within the working budget. Resume or select a larger workload mode.');
+        if (error instanceof Error && error.message === 'Local road search stopped.') useSmallerSections = true;
+        else ledger.pause(task.key, 'The local search failed unexpectedly. Completed sections and other routes are saved. Resume retries this connection.');
       } finally {
         memory.clear(); client.cancel();
+      }
+      if (useSmallerSections && ledger.get(task.key)?.state === 'preparing') {
+        options.onProgress?.({ key: task.key, completed: 0, total: 0, message: 'Switching automatically to smaller road sections.', unit: 'sections' });
+        await processSplitTrip(options, task.key, () => !directIfOverLimit(task));
+        if (signal.aborted) throw abortError();
       }
       activeKey = null;
       const profileAfter = options.profile();
@@ -157,6 +180,6 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
   } finally {
     signal.removeEventListener('abort', stopWorker);
     client.cancel();
-    if (activeKey && ledger.get(activeKey)?.state === 'preparing') ledger.retry(activeKey);
+    if (activeKey && ledger.get(activeKey)?.state === 'preparing') ledger.requeue(activeKey);
   }
 }

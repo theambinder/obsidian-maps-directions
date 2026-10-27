@@ -1,12 +1,21 @@
 /** Local, approximate walking paths from already loaded vector road geometry. */
 export type RoadCoordinate = [number, number];
+export interface RoadAnchor { point: RoadCoordinate; grade: string; bearing?: number }
+/** A cross-section perpendicular to from→to, centered on the corridor. */
+export interface RoadGate {
+  from: RoadCoordinate;
+  to: RoadCoordinate;
+  center: RoadCoordinate;
+  halfWidthMeters: number;
+  maxPortals?: number;
+}
 export interface RoadFeature {
   geometry?: { type?: unknown; coordinates?: unknown } | null;
   properties?: Record<string, unknown> | null;
 }
 export interface RoadRoute { coordinates: RoadCoordinate[]; distance: number }
 export interface RoadGraphStats { nodes: number; edges: number; truncated: boolean }
-interface Node { point: RoadCoordinate; grade: string; endpoint: boolean; links: Link[] }
+interface Node { point: RoadCoordinate; grade: string; endpoint: boolean; originalEndpoint: boolean; links: Link[] }
 interface Link { to: number; distance: number }
 interface Segment { a: number; b: number; grade: string; splits: { t: number; node: number }[] }
 interface Projection { point: RoadCoordinate; t: number; distance: number }
@@ -27,6 +36,7 @@ const MAX_INPUT_VERTICES = 250000;
 const MAX_INPUT_LINES = 50000;
 const MAX_JOIN_CHECKS = 500000;
 const MAX_SNAP_CANDIDATES = 12;
+const STRICT_ANCHOR_METERS = 0.05;
 const ROAD_CLASSES = new Set([
   'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'minor', 'service', 'track', 'path',
   'residential', 'unclassified', 'living_street', 'footway', 'cycleway', 'pedestrian', 'steps',
@@ -39,6 +49,8 @@ const valid = (point: unknown): point is RoadCoordinate => Array.isArray(point) 
   Number.isFinite(point[1]) && Math.abs(point[1]) <= 85.051129;
 const mercatorY = (lat: number): number => EARTH * Math.log(Math.tan(Math.PI / 4 + lat * RAD / 2));
 const clean = (p: RoadCoordinate): RoadCoordinate => [normalize(p[0]), p[1]];
+const segmentBearing = (a: RoadCoordinate, b: RoadCoordinate, latitude: number): number =>
+  ((Math.atan2(b[1] - a[1], deltaLongitude(a[0], b[0]) * Math.cos(latitude * RAD)) / RAD) % 180 + 180) % 180;
 
 /** Great-circle weights and heuristic use the same metric, keeping A* admissible. */
 export function roadDistance(a: RoadCoordinate, b: RoadCoordinate): number {
@@ -116,6 +128,23 @@ class SegmentIndex {
     }
     return result;
   }
+  /** Candidate crossings share a cell; callers count duplicate visits in their budget. */
+  *pairs(): IterableIterator<[number, number]> {
+    const worldCells = Math.floor(WORLD / CELL);
+    for (const [key, bucket] of this.cells) {
+      for (let left = 0; left < bucket.length; left++) {
+        for (let right = left + 1; right < bucket.length; right++) yield [bucket[left], bucket[right]];
+      }
+      // Date-line segments may be indexed in adjacent world copies. A world
+      // width is not an integer cell count, so both neighboring shifts matter.
+      const [x, y] = key.split(',').map(Number);
+      for (const shift of [worldCells, worldCells + 1, -worldCells, -worldCells - 1]) {
+        const mirrored = this.cells.get(`${x + shift},${y}`);
+        if (!mirrored) continue;
+        for (const left of bucket) for (const right of mirrored) if (left !== right) yield [left, right];
+      }
+    }
+  }
 }
 
 interface QueueItem { node: number; g: number; f: number }
@@ -173,11 +202,73 @@ export class RoadGraph {
       component++;
     }
   }
-  route(from: RoadCoordinate, to: RoadCoordinate, maxSnapMeters = 100): RoadRoute | null {
+  /** Real road intersections with a corridor cross-section, spread across its width. */
+  portals(gate: RoadGate): RoadAnchor[] {
+    if (!gate || !valid(gate.from) || !valid(gate.to) || !valid(gate.center) ||
+      !Number.isFinite(gate.halfWidthMeters) || gate.halfWidthMeters < 0) return [];
+    const limit = Number.isFinite(gate.maxPortals) ? Math.max(0, Math.min(12, Math.floor(gate.maxPortals!))) : 8;
+    if (!limit) return [];
+    const cosine = Math.cos(gate.center[1] * RAD);
+    const local = (point: RoadCoordinate): RoadCoordinate => [deltaLongitude(gate.center[0], point[0]) * cosine * RAD * EARTH, (point[1] - gate.center[1]) * RAD * EARTH];
+    const from = local(gate.from), to = local(gate.to);
+    const length = Math.hypot(to[0] - from[0], to[1] - from[1]);
+    if (length < 0.001) return [];
+    const ux = (to[0] - from[0]) / length, uy = (to[1] - from[1]) / length;
+    type Portal = { anchor: RoadAnchor; lateral: number; component: number; key: string };
+    const candidates = new Map<string, Portal>();
+    for (const segment of this.segments) {
+      const a = this.nodes[segment.a].point, b = this.nodes[segment.b].point;
+      const p = local(a), q = local(b);
+      const alongA = p[0] * ux + p[1] * uy, alongB = q[0] * ux + q[1] * uy;
+      const denominator = alongA - alongB;
+      let t: number;
+      if (Math.abs(denominator) < 1e-9) {
+        if (Math.abs(alongA) > 1e-6) continue;
+        // A road lying on the gate contributes its nearest real point.
+        const dx = q[0] - p[0], dy = q[1] - p[1], squared = dx * dx + dy * dy;
+        t = squared ? Math.max(0, Math.min(1, -(p[0] * dx + p[1] * dy) / squared)) : 0;
+      } else {
+        t = alongA / denominator;
+        if (t < -1e-10 || t > 1 + 1e-10) continue;
+        t = Math.max(0, Math.min(1, t));
+      }
+      const x = p[0] + (q[0] - p[0]) * t, y = p[1] + (q[1] - p[1]) * t;
+      const lateral = -x * uy + y * ux;
+      if (Math.abs(lateral) > gate.halfWidthMeters + 1e-6) continue;
+      const point: RoadCoordinate = [normalize(a[0] + deltaLongitude(a[0], b[0]) * t), a[1] + (b[1] - a[1]) * t];
+      const key = `${point[0].toFixed(8)},${point[1].toFixed(8)}|${segment.grade}`;
+      const candidate: Portal = { anchor: { point, grade: segment.grade, bearing: segmentBearing(a, b, point[1]) }, lateral, component: this.components[segment.a], key };
+      const prior = candidates.get(key);
+      if (!prior || candidate.anchor.bearing! < prior.anchor.bearing! || candidate.anchor.bearing === prior.anchor.bearing &&
+        (point[0] < prior.anchor.point[0] || point[0] === prior.anchor.point[0] && point[1] < prior.anchor.point[1])) candidates.set(key, candidate);
+    }
+    const ordered = [...candidates.values()].sort((a, b) => Math.abs(a.lateral) - Math.abs(b.lateral) || a.key.localeCompare(b.key));
+    if (!ordered.length) return [];
+    const selected = [ordered.shift()!], components = new Set([selected[0].component]);
+    const diversityBonus = Math.max(1, gate.halfWidthMeters * 2 / limit);
+    while (selected.length < limit && ordered.length) {
+      let best = 0, bestScore = -Infinity;
+      for (let index = 0; index < ordered.length; index++) {
+        const candidate = ordered[index];
+        const spacing = Math.min(...selected.map(other => Math.abs(candidate.lateral - other.lateral)));
+        const score = spacing + (components.has(candidate.component) ? 0 : diversityBonus);
+        if (score > bestScore) { best = index; bestScore = score; }
+      }
+      const candidate = ordered.splice(best, 1)[0];
+      selected.push(candidate); components.add(candidate.component);
+    }
+    return selected.map(candidate => candidate.anchor);
+  }
+
+  route(from: RoadCoordinate, to: RoadCoordinate, maxSnapMeters = 100, anchors?: { from?: RoadAnchor; to?: RoadAnchor }): RoadRoute | null {
     if (!valid(from) || !valid(to) || !Number.isFinite(maxSnapMeters)) return null;
-    const radius = Math.max(0, Math.min(100, maxSnapMeters));
+    const radius = Math.max(0, Math.min(1000, maxSnapMeters));
     const origin = clean(from), destination = clean(to);
-    let starts = this.snapCandidates(origin, radius), ends = this.snapCandidates(destination, radius);
+    const strict = (point: RoadCoordinate, anchor: RoadAnchor): Snap[] => !valid(anchor?.point) || typeof anchor.grade !== 'string' ||
+      anchor.bearing !== undefined && (!Number.isFinite(anchor.bearing) || anchor.bearing < 0 || anchor.bearing > 180) ||
+      roadDistance(point, anchor.point) > STRICT_ANCHOR_METERS ? [] : this.snapCandidates(clean(anchor.point), STRICT_ANCHOR_METERS, anchor.grade, anchor.bearing);
+    let starts = anchors?.from ? strict(origin, anchors.from) : this.snapCandidates(origin, radius);
+    let ends = anchors?.to ? strict(destination, anchors.to) : this.snapCandidates(destination, radius);
     if (!starts.length || !ends.length) return null;
     // Preserve the nearest-road route whenever that network is connected.
     // Alternatives only recover a route that nearest-only snapping could not find.
@@ -254,10 +345,15 @@ export class RoadGraph {
     if (coordinates.length === 1) coordinates.push([...coordinates[0]]);
     return { coordinates, distance: Math.max(0, best - start.distance - end.distance) };
   }
-  private snapCandidates(point: RoadCoordinate, radius: number): Snap[] {
+  private snapCandidates(point: RoadCoordinate, radius: number, requiredGrade?: string, requiredBearing?: number): Snap[] {
     const nearest = new Map<number, { id: number; snap: Snap }>();
     for (const id of this.index.near(point, radius)) {
       const segment = this.segments[id];
+      if (requiredGrade !== undefined && segment.grade !== requiredGrade) continue;
+      if (requiredBearing !== undefined) {
+        const difference = Math.abs(segmentBearing(this.nodes[segment.a].point, this.nodes[segment.b].point, point[1]) - requiredBearing);
+        if (Math.min(difference, 180 - difference) > 0.1) continue;
+      }
       const candidate = projection(point, this.nodes[segment.a].point, this.nodes[segment.b].point);
       const component = this.components[segment.a];
       const existing = nearest.get(component);
@@ -282,13 +378,20 @@ export function buildRoadGraph(features: readonly RoadFeature[]): RoadGraph {
   const index = new SegmentIndex();
   let truncated = false;
   let inputVertices = 0, inputLines = 0;
-  const getNode = (point: RoadCoordinate, level: string, endpoint: boolean): number => {
-    const key = `${Math.round(point[0] * 1e6)},${Math.round(point[1] * 1e6)}|${level}`;
+  const getNode = (point: RoadCoordinate, level: string, endpoint: boolean, originalEndpoint = false): number => {
+    // Millimetre-scale canonical coordinates keep strict anchors stable between
+    // clipped windows; the former 1e-6 grid could move a road by over 5 cm.
+    const canonical: RoadCoordinate = [normalize(Math.round(point[0] * 1e8) / 1e8), Math.round(point[1] * 1e8) / 1e8];
+    const key = `${Math.round(canonical[0] * 1e8)},${Math.round(canonical[1] * 1e8)}|${level}`;
     const existing = keys.get(key);
-    if (existing !== undefined) { if (endpoint) nodes[existing].endpoint = true; return existing; }
+    if (existing !== undefined) {
+      if (endpoint) nodes[existing].endpoint = true;
+      if (originalEndpoint) nodes[existing].originalEndpoint = true;
+      return existing;
+    }
     if (nodes.length >= MAX_NODES) { truncated = true; return -1; }
     const id = nodes.length;
-    nodes.push({ point, grade: level, endpoint, links: [] }); keys.set(key, id);
+    nodes.push({ point: canonical, grade: level, endpoint, originalEndpoint, links: [] }); keys.set(key, id);
     return id;
   };
   featureLoop: for (let f = 0; f < features.length; f++) {
@@ -299,7 +402,10 @@ export function buildRoadGraph(features: readonly RoadFeature[]): RoadGraph {
     const lines: unknown[] = geometry.type === 'LineString' ? [geometry.coordinates] :
       geometry.type === 'MultiLineString' && Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
     const level = grade(feature.properties ?? {});
-    for (const line of lines) {
+    const rawFlags = feature.properties?.__mapsDirectionsEndpointFlags;
+    const flags = typeof rawFlags === 'string' ? rawFlags.split('|') : [];
+    const validFlags = flags.length === lines.length && flags.every(value => /^[01]{2}$/.test(value));
+    for (const [lineIndex, line] of lines.entries()) {
       if (++inputLines > MAX_INPUT_LINES) { truncated = true; break featureLoop; }
       if (!Array.isArray(line) || line.length < 2) continue;
       // Invalid vertices split a feature; never bridge over corrupt coordinates.
@@ -309,7 +415,10 @@ export function buildRoadGraph(features: readonly RoadFeature[]): RoadGraph {
         if (segments.length >= MAX_SEGMENTS) { truncated = true; break featureLoop; }
         if (!valid(line[i])) { previous = -1; continue; }
         const point = clean(line[i]);
-        const node = getNode(point, level, i === 0 || i === line.length - 1);
+        const endpoint = i === 0 || i === line.length - 1;
+        const originalEndpoint = endpoint && (rawFlags === undefined || validFlags &&
+          (i === 0 && flags[lineIndex][0] === '1' || i === line.length - 1 && flags[lineIndex][1] === '1'));
+        const node = getNode(point, level, endpoint, originalEndpoint);
         if (node < 0) break featureLoop;
         if (previous >= 0 && previous !== node) {
           const key = `${Math.min(previous, node)},${Math.max(previous, node)}`;
@@ -324,9 +433,35 @@ export function buildRoadGraph(features: readonly RoadFeature[]): RoadGraph {
     }
   }
 
+  // Drawing tiles can cross same-level road interiors without a shared vertex.
+  // Split only at an exact intersection, with the same grade on both segments.
+  // Inserted junctions never gain original endpoint provenance for level changes.
+  let joinChecks = 0;
+  for (const [left, right] of index.pairs()) {
+    if (++joinChecks > MAX_JOIN_CHECKS) { truncated = true; break; }
+    const first = segments[left], second = segments[right];
+    if (first.grade !== second.grade || first.a === second.a || first.a === second.b || first.b === second.a || first.b === second.b) continue;
+    const a = nodes[first.a].point, b = nodes[first.b].point;
+    const c = nodes[second.a].point, d = nodes[second.b].point;
+    const cosine = Math.cos(a[1] * RAD);
+    const rx = deltaLongitude(a[0], b[0]) * cosine * RAD * EARTH, ry = (b[1] - a[1]) * RAD * EARTH;
+    const cx = deltaLongitude(a[0], c[0]) * cosine * RAD * EARTH, cy = (c[1] - a[1]) * RAD * EARTH;
+    const sx = deltaLongitude(c[0], d[0]) * cosine * RAD * EARTH, sy = (d[1] - c[1]) * RAD * EARTH;
+    const determinant = rx * sy - ry * sx;
+    if (Math.abs(determinant) <= Math.hypot(rx, ry) * Math.hypot(sx, sy) * 1e-12) continue;
+    let t = (cx * sy - cy * sx) / determinant, u = (cx * ry - cy * rx) / determinant;
+    if (t < -1e-10 || t > 1 + 1e-10 || u < -1e-10 || u > 1 + 1e-10) continue;
+    t = Math.max(0, Math.min(1, t)); u = Math.max(0, Math.min(1, u));
+    if (!(t > 1e-9 && t < 1 - 1e-9 || u > 1e-9 && u < 1 - 1e-9)) continue;
+    const point: RoadCoordinate = [normalize(a[0] + deltaLongitude(a[0], b[0]) * t), a[1] + (b[1] - a[1]) * t];
+    const node = getNode(point, first.grade, false);
+    if (node < 0) break;
+    if (!first.splits.some(split => split.node === node)) first.splits.push({ t, node });
+    if (!second.splits.some(split => split.node === node)) second.splits.push({ t: u, node });
+  }
+
   const stitches: [number, number][] = [];
   const endpoints = nodes.flatMap((node, id) => node.endpoint ? [id] : []);
-  let joinChecks = 0;
   endpointLoop: for (const id of endpoints) {
     const node = nodes[id];
     for (const segmentId of index.near(node.point, STITCH_METERS)) {
@@ -341,7 +476,7 @@ export function buildRoadGraph(features: readonly RoadFeature[]): RoadGraph {
         // It must never turn a crossing in the middle of a bridge into a junction.
         const target = roadDistance(node.point, a.point) <= STITCH_METERS ? segment.a :
           roadDistance(node.point, b.point) <= STITCH_METERS ? segment.b : -1;
-        if (target < 0 || !nodes[target].endpoint || !transitionGrade(node.grade, segment.grade)) continue;
+        if (!node.originalEndpoint || target < 0 || !nodes[target].originalEndpoint || !transitionGrade(node.grade, segment.grade)) continue;
         const ownSegments = index.near(node.point, STITCH_METERS);
         let aligned = false;
         for (const ownId of ownSegments) {
