@@ -1277,7 +1277,7 @@ function smartPreparationSetup(options: { ledger?: TripQueue; cache?: RoadRouteC
   const ledger = options.ledger ?? new TripQueue();
   const subject = preparationSetup({
     tripQueue: ledger, visible: options.visible ?? (() => true), autoDelayMs: 5,
-    workload: options.workload ?? (() => workloadProfile({ mode: 'eco', pauseMs: 0 })),
+    workload: options.workload ?? (() => workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 0 })),
   }, options.cache ?? new RoadRouteCache());
   subject.view.markerManager.markers[0].coordinates = [22, 114];
   subject.view.markerManager.markers[1].coordinates = [22.001, 114.002];
@@ -1298,6 +1298,216 @@ function allElementText(element: OverlayTestElement): string {
   return [element.textContent, ...element.children.map(allElementText)].join(' ');
 }
 
+test('the production 30 km default draws long grouped connections as solid colored arrows without allocating road work', async () => {
+  const profile = workloadProfile({ mode: 'eco', pauseMs: 0 });
+  assert.equal(profile.maxDistanceKm, 30);
+  const subject = smartPreparationSetup({ automatic: true, workload: () => profile });
+  groupPairs(subject.view);
+  subject.settings[KEYS.group] = 'route';
+  subject.settings[KEYS.colorMode] = 'random';
+  subject.overlay.update();
+  await new Promise(resolve => setTimeout(resolve, 15));
+  const connections = mainConnections(subject.map);
+  assert.equal(connections.length, 2);
+  assert.ok(connections.every(feature => feature.properties.connectionKind === 'direct' && feature.geometry.coordinates.length === 2));
+  assert.equal(new Set(connections.map(feature => feature.properties.lineColor)).size, 2);
+  assertMatchingArrowImages(subject.map);
+  const solid = [...subject.map.layers.values()].find(layer => layer.type === 'line' && !(layer.paint as Record<string, unknown>)['line-dasharray'])!;
+  assert.deepEqual(solid.filter, ['all', ['!=', ['get', 'connectionKind'], 'fallback'], ['!=', ['get', 'connectionKind'], 'connector']]);
+  const dashed = [...subject.map.layers.values()].find(layer => layer.type === 'line' && (layer.paint as Record<string, unknown>)['line-dasharray'])!;
+  assert.deepEqual(dashed.filter, ['in', ['get', 'connectionKind'], ['literal', ['fallback', 'connector']]]);
+  assert.equal(subject.ledger.snapshot().direct, 2);
+  assert.equal(subject.ledger.snapshot().eligible, 0);
+  assert.equal(subject.ledger.snapshot().processed, 0);
+  assert.equal(subject.ledger.snapshot().ready, 0);
+  assert.equal(subject.ledger.snapshot().percentRemaining, 0);
+  assert.ok(subject.ledger.serialize().tasks.every(task => task.state === 'direct' && task.areas.length === 0));
+  assert.match(allElementText(subject.host), /Day 1/);
+  assert.match(allElementText(subject.host), /Day 2/);
+  assert.match(allElementText(subject.host), /Road routes: 0\/0 eligible/);
+  assert.match(allElementText(subject.host), /Skipped by distance: 2/);
+  assert.match(allElementText(subject.host), /Processed 0\/0 eligible connections \(100%\) · Remaining: 0 \(0%\) · Skipped by distance: 2/);
+  assert.equal(preparationControl(subject.host).button.hidden, true);
+  assert.equal(subject.background.calls.length, 0);
+  assert.equal(subject.client.calls.length, 0);
+  assert.equal(subject.roads.queries, 0);
+  assert.deepEqual(subject.cameraMoves, []);
+  assert.deepEqual(subject.errors, []);
+  assertOriginalResources(subject.map);
+  subject.overlay.destroy();
+});
+
+test('manual preparation and retry leave an entirely distance-skipped queue idle', async () => {
+  const subject = smartPreparationSetup({ workload: () => workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 30 }) });
+  subject.view.markerManager.markers[1].coordinates = [23, 115];
+  subject.overlay.update();
+  await subject.overlay.prepareRoadRoutes();
+  await subject.overlay.prepareRoadRoutes(false, false);
+  assert.equal(subject.ledger.snapshot().direct, 1);
+  assert.equal(subject.ledger.snapshot().queued, 0);
+  assert.equal(subject.ledger.snapshot().preparing, 0);
+  assert.equal(subject.background.calls.length, 0);
+  assert.equal(subject.client.calls.length, 0);
+  assert.equal(preparationControl(subject.host).button.hidden, true);
+  assert.deepEqual(subject.errors, []);
+  subject.overlay.destroy();
+});
+
+test('saved long road geometry stays straight above the cutoff and is reused after raising or removing the limit without a new search', () => {
+  let profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 30 });
+  const subject = smartPreparationSetup({ workload: () => profile });
+  subject.view.markerManager.markers[1].coordinates = [23, 115];
+  const route: RoadRoute = { coordinates: [[114, 22], [114.5, 22.1], [115, 23]], distance: 160000 };
+  subject.cache.set(markerRouteKey(...subject.view.markerManager.markers as [MapsMarker, MapsMarker]), route);
+  subject.overlay.update();
+  assert.equal(mainConnections(subject.map)[0].properties.connectionKind, 'direct');
+  assert.equal(mainConnections(subject.map)[0].geometry.coordinates.length, 2);
+  assert.deepEqual(subject.ledger.serialize().tasks[0].route, route);
+  for (const maxDistanceKm of [200, 30, 0, 30]) {
+    profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm });
+    subject.overlay.workloadChanged();
+    const isDirect = maxDistanceKm === 30;
+    assert.equal(mainConnections(subject.map)[0].properties.connectionKind, isDirect ? 'direct' : 'road');
+    assert.equal(mainConnections(subject.map)[0].geometry.coordinates.length, isDirect ? 2 : 3);
+    assert.equal(subject.ledger.snapshot().direct, isDirect ? 1 : 0);
+    assert.equal(subject.ledger.snapshot().ready, isDirect ? 0 : 1);
+    assert.deepEqual(subject.ledger.serialize().tasks[0].route, route);
+  }
+  const saved = subject.ledger.serialize();
+  subject.overlay.destroy();
+  const fresh = smartPreparationSetup({ ledger: new TripQueue(saved), workload: () => profile });
+  fresh.view.markerManager.markers[1].coordinates = [23, 115];
+  fresh.overlay.update();
+  assert.equal(mainConnections(fresh.map)[0].properties.connectionKind, 'direct');
+  profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 0 });
+  fresh.overlay.workloadChanged();
+  assert.equal(mainConnections(fresh.map)[0].properties.connectionKind, 'road');
+  assert.equal(mainConnections(fresh.map)[0].geometry.coordinates.length, 3);
+  assert.equal(fresh.cache.serialize().routes.length, 0);
+  for (const instance of [subject, fresh]) {
+    assert.equal(instance.background.calls.length, 0);
+    assert.equal(instance.client.calls.length, 0);
+    assert.deepEqual(instance.errors, []);
+    assertOriginalResources(instance.map);
+  }
+  fresh.overlay.destroy();
+});
+
+test('lowering the distance limit aborts an in-flight connection and a late worker cannot replace its solid straight line', async () => {
+  let profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 0 });
+  const subject = smartPreparationSetup({ workload: () => profile });
+  subject.view.markerManager.markers[1].coordinates = [23, 115];
+  subject.overlay.update();
+  const operation = subject.overlay.prepareRoadRoutes(false, false);
+  const route: RoadRoute = { coordinates: [[114, 22], [114.5, 22.1], [115, 23]], distance: 160000 };
+  const snapshot = subject.background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: route.coordinates }, properties: { class: 'minor' } }]);
+  assert.equal(subject.client.calls.length, 1);
+  profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 30 });
+  subject.overlay.workloadChanged();
+  assert.equal(subject.background.calls[0].options.signal?.aborted, true);
+  subject.client.finish(0, [route]);
+  assert.equal(await snapshot, false);
+  subject.background.finish(0);
+  await operation;
+  assert.equal(subject.ledger.snapshot().direct, 1);
+  assert.equal(subject.ledger.snapshot().ready, 0);
+  assert.equal(subject.ledger.serialize().tasks[0].route, undefined);
+  assert.equal(subject.cache.serialize().routes.length, 0);
+  assert.equal(mainConnections(subject.map)[0].properties.connectionKind, 'direct');
+  assert.equal(mainConnections(subject.map)[0].geometry.coordinates.length, 2);
+  assert.deepEqual(subject.errors, []);
+  assertOriginalResources(subject.map);
+  subject.overlay.destroy();
+});
+
+test('mixed saved and distance-skipped groups exclude straight connections from road progress', async () => {
+  const subject = smartPreparationSetup({ automatic: true, workload: () => workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 30 }) });
+  groupPairs(subject.view);
+  subject.settings[KEYS.group] = 'route';
+  subject.settings[KEYS.colorMode] = 'random';
+  subject.view.markerManager.markers[0].coordinates = [22, 114];
+  subject.view.markerManager.markers[1].coordinates = [22.001, 114.002];
+  subject.cache.set(markerRouteKey(subject.view.markerManager.markers[0], subject.view.markerManager.markers[1]), cityRoute);
+  subject.overlay.update();
+  await new Promise(resolve => setTimeout(resolve, 15));
+  const progress = subject.ledger.snapshot();
+  assert.equal(progress.total, 2);
+  assert.equal(progress.eligible, 1);
+  assert.equal(progress.processed, 1);
+  assert.equal(progress.ready, 1);
+  assert.equal(progress.direct, 1);
+  assert.equal(progress.noPath, 0);
+  assert.equal(progress.unavailable, 0);
+  assert.equal(progress.percentRemaining, 0);
+  assert.deepEqual(mainConnections(subject.map).map(feature => feature.properties.connectionKind).sort(), ['direct', 'road']);
+  assert.match(allElementText(subject.host), /Road routes: 1\/1 eligible/);
+  assert.match(allElementText(subject.host), /Ready: 1 · Skipped by distance: 1 · No path: 0/);
+  assert.match(allElementText(subject.host), /Processed 1\/1 eligible connections \(100%\) · Remaining: 0 \(0%\) · Skipped by distance: 1/);
+  assert.equal(preparationControl(subject.host).button.hidden, true);
+  assertMatchingArrowImages(subject.map);
+  assert.equal(subject.background.calls.length, 0);
+  assert.equal(subject.client.calls.length, 0);
+  assert.deepEqual(subject.errors, []);
+  subject.overlay.destroy();
+});
+
+test('a queued short connection remains half the eligible work while a long skipped group adds no progress', () => {
+  const subject = smartPreparationSetup({ workload: () => workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 30 }) });
+  groupPairs(subject.view);
+  subject.settings[KEYS.group] = 'route';
+  subject.view.markerManager.markers[0].coordinates = [22, 114];
+  subject.view.markerManager.markers[1].coordinates = [22.001, 114.002];
+  const pending = [groupedMarker('c1.md', 0, 1, 'Day 3'), groupedMarker('c2.md', 0, 2, 'Day 3')];
+  pending[0].coordinates = [22.002, 114.003];
+  pending[1].coordinates = [22.003, 114.004];
+  subject.view.markerManager.markers.push(...pending);
+  subject.cache.set(markerRouteKey(subject.view.markerManager.markers[0], subject.view.markerManager.markers[1]), cityRoute);
+  subject.overlay.update();
+  const progress = subject.ledger.snapshot();
+  assert.equal(progress.total, 3);
+  assert.equal(progress.eligible, 2);
+  assert.equal(progress.processed, 1);
+  assert.equal(progress.direct, 1);
+  assert.equal(progress.queued, 1);
+  assert.equal(progress.percentComplete, 50);
+  assert.equal(progress.percentRemaining, 50);
+  assert.match(allElementText(subject.host), /Road routes: 1\/2 eligible/);
+  assert.match(allElementText(subject.host), /Processed 1\/2 eligible connections \(50%\) · Remaining: 1 \(50%\) · Skipped by distance: 1/);
+  assert.equal(subject.background.calls.length, 0);
+  assert.equal(subject.client.calls.length, 0);
+  assert.deepEqual(subject.errors, []);
+  subject.overlay.destroy();
+});
+
+test('temporary distance edits preserve a previous no-path outcome and a user pause without automatic retries', async () => {
+  let profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 30 });
+  const subject = smartPreparationSetup({ automatic: true, workload: () => profile });
+  subject.overlay.update();
+  const key = subject.ledger.serialize().tasks[0].key;
+  subject.ledger.finish(key, 'no-path', 'No connected walking path was found.');
+  subject.overlay.update();
+  for (const previousState of ['no-path', 'paused'] as const) {
+    if (previousState === 'paused') {
+      subject.ledger.retry(key);
+      subject.ledger.pause(key, 'User paused.');
+      subject.overlay.update();
+    }
+    const previousReason = subject.ledger.status(key)?.reason;
+    profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 0.01 });
+    subject.overlay.workloadChanged();
+    assert.equal(subject.ledger.status(key)?.state, 'direct');
+    profile = workloadProfile({ mode: 'eco', pauseMs: 0, maxDistanceKm: 30 });
+    subject.overlay.workloadChanged();
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(subject.ledger.status(key)?.state, previousState);
+    assert.equal(subject.ledger.status(key)?.reason, previousReason);
+    assert.equal(subject.background.calls.length, 0);
+    assert.equal(subject.client.calls.length, 0);
+  }
+  assert.deepEqual(subject.errors, []);
+  subject.overlay.destroy();
+});
+
 test('production smart integration migrates every legacy cached connection beyond 200 into the durable trip ledger immediately', () => {
   const cache = new RoadRouteCache(), subject = smartPreparationSetup({ cache });
   subject.view.markerManager.markers = Array.from({ length: 226 }, (_, index) => cityMarker(index));
@@ -1314,7 +1524,7 @@ test('production smart integration migrates every legacy cached connection beyon
   assert.ok(subject.ledger.serialize().tasks.every(task => task.route));
   assert.equal(subject.client.calls.length, 0);
   assert.equal(subject.background.calls.length, 0);
-  assert.match(allElementText(subject.host), /Processed 225\/225 connections.*0% remaining/);
+  assert.match(allElementText(subject.host), /Processed 225\/225 eligible connections \(100%\) · Remaining: 0 \(0%\)/);
   assertOriginalResources(subject.map);
   assert.deepEqual(subject.errors, []);
   subject.overlay.destroy();
@@ -1323,7 +1533,7 @@ test('production smart integration migrates every legacy cached connection beyon
 test('production queue progress uses processed attempts, passes the global Eco working profile and persists a newly found route', async () => {
   const subject = smartPreparationSetup();
   subject.overlay.update();
-  assert.match(allElementText(subject.host), /Processed 0\/1 connections.*100% remaining/);
+  assert.match(allElementText(subject.host), /Processed 0\/1 eligible connections \(0%\) · Remaining: 1 \(100%\)/);
   assert.match(allElementText(subject.host), /Eco/);
   const operation = subject.overlay.prepareRoadRoutes(false, false);
   assert.equal(preparationControl(subject.host).button.textContent, 'Pause');
@@ -1341,7 +1551,7 @@ test('production queue progress uses processed attempts, passes the global Eco w
   assert.equal(subject.ledger.snapshot().ready, 1);
   assert.equal(subject.ledger.snapshot().percentRemaining, 0);
   assert.deepEqual(subject.ledger.serialize().tasks[0].route, cityRoute);
-  assert.match(allElementText(subject.host), /Processed 1\/1 connections.*0% remaining/);
+  assert.match(allElementText(subject.host), /Processed 1\/1 eligible connections \(100%\) · Remaining: 0 \(0%\)/);
   assert.deepEqual(subject.cameraMoves, []);
   assert.deepEqual(subject.errors, []);
   subject.overlay.destroy();
@@ -1485,7 +1695,7 @@ test('a source-style change migrates an already retained positive path into its 
   assert.equal(subject.ledger.snapshot().total, 2);
   assert.equal(subject.ledger.snapshot().ready, 2);
   assert.equal(mainConnections(subject.map)[0].properties.connectionKind, 'road');
-  assert.match(allElementText(subject.host), /Processed 1\/1 connections.*0% remaining/);
+  assert.match(allElementText(subject.host), /Processed 1\/1 eligible connections \(100%\) · Remaining: 0 \(0%\)/);
   assert.equal(subject.background.calls.length, 0);
   assert.equal(subject.client.calls.length, 0);
   assert.equal(subject.cache.serialize().routes.length, 0);

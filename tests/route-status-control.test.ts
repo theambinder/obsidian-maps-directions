@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import type { FeatureCollection } from '../src/contracts';
 import type { TripQueueSnapshot } from '../src/trip-queue';
 import type { ResourceSnapshot } from '../src/resource-sampler';
+import type { StorageSnapshot } from '../src/storage-usage';
+import type { SharedHttpCacheSnapshot } from '../src/shared-http-cache';
 import { getRoadRouteProgress, RouteStatusControl } from '../src/route-status-control';
 
 const feature = (connectionKind?: string): FeatureCollection['features'][number] => ({
@@ -27,7 +29,10 @@ class FakeElement {
   attributes: Record<string, string> = {};
   listeners = new Map<string, (event: { stopPropagation(): void }) => void>();
   className = '';
-  textContent = '';
+  private text = '';
+  textWrites = 0;
+  get textContent(): string { return this.text; }
+  set textContent(value: string) { this.text = value; this.textWrites++; }
   title = '';
   open = false;
   hidden = false;
@@ -297,8 +302,8 @@ test('durable queue percentage measures processed connections independently from
   control.update(element(container), data('road', 'road', ...Array(8).fill('fallback')), true, 'Processing.', null,
     { running: true, completed: 2, total: 4 }, () => {}, true, tripSnapshot(), resourceSnapshot(), 'Eco');
   const root = container.children[0], header = root.children[0], details = root.children[2];
-  assert.equal(header.children[0].textContent, 'Road routes: 2/10');
-  assert.equal(header.children[2].textContent, 'Processed 7/10 connections — 30% remaining');
+  assert.equal(header.children[0].textContent, 'Road routes: 2/10 eligible');
+  assert.equal(header.children[2].textContent, 'Processed 7/10 eligible connections (70%) · Remaining: 3 (30%) · Skipped by distance: 0');
   assert.equal(header.children[2].attributes.role, 'status');
   assert.equal(root.children[1].textContent, 'Preparing roads: 2/4 areas');
   assert.match(details.children[1].textContent, /does not mean every route was found/);
@@ -334,7 +339,7 @@ test('queue Pause and Resume preserve completed progress and work in automatic m
   assert.equal(button.style.display, '');
   assert.match(button.title, /current workload settings/);
   assert.equal(root.children[1].textContent, reason);
-  assert.equal(header.children[2].textContent, 'Processed 7/10 connections — 30% remaining');
+  assert.equal(header.children[2].textContent, 'Processed 7/10 eligible connections (70%) · Remaining: 3 (30%) · Skipped by distance: 0');
   button.click();
   assert.equal(resumes, 1);
   assert.equal(pauses, 1);
@@ -349,11 +354,15 @@ test('finished queue can show zero percent remaining while some routes remain un
   control.update(element(container), data('road', 'road', ...Array(8).fill('fallback')), true, '', () => {},
     { running: false, completed: 4, total: 4 }, undefined, true, finished, undefined, 'Eco');
   const header = container.children[0].children[0];
-  assert.equal(header.children[0].textContent, 'Road routes: 2/10');
-  assert.equal(header.children[2].textContent, 'Processed 10/10 connections — 0% remaining');
+  assert.equal(header.children[0].textContent, 'Road routes: 2/10 eligible');
+  assert.equal(header.children[2].textContent, 'Processed 10/10 eligible connections (100%) · Remaining: 0 (0%) · Skipped by distance: 0');
   assert.equal(header.children[1].hidden, true);
   assert.equal(header.children[1].style.display, 'none');
   assert.equal(header.children[3].textContent, 'Eco · Window CPU — · Window RAM —');
+  control.update(element(container), data('road', 'road', ...Array(8).fill('fallback')), true, '', () => {},
+    undefined, undefined, false, finished);
+  assert.equal(header.children[1].hidden, true);
+  assert.equal(header.children[1].style.display, 'none');
 });
 
 test('resource readings update without rebuilding the queue or mislabelling unavailable values', () => {
@@ -368,7 +377,7 @@ test('resource readings update without rebuilding the queue or mislabelling unav
   assert.equal(container.children[0], root);
   assert.equal(root.children[2], details);
   assert.equal(details.open, true);
-  assert.equal(header.children[2].textContent, 'Processed 7/10 connections — 29.4% remaining');
+  assert.equal(header.children[2].textContent, 'Processed 7/10 eligible connections (70%) · Remaining: 3 (29.4%) · Skipped by distance: 0');
   assert.equal(header.children[3].textContent, 'Balanced · Window CPU 205.1% · Window RAM 1501 MiB');
   control.update(element(container), data('fallback'), true, '', null, undefined, undefined, true,
     tripSnapshot(), resourceSnapshot({ currentCpuPercent: NaN, currentMemoryMb: -1 }), '<img src=x>');
@@ -378,4 +387,142 @@ test('resource readings update without rebuilding the queue or mislabelling unav
   assert.equal(header.children[2].style.display, 'none');
   assert.equal(header.children[3].hidden, true);
   assert.equal(header.children[3].style.display, 'none');
+});
+
+
+const storageSnapshot = (changes: Partial<StorageSnapshot> = {}): StorageSnapshot => ({
+  scope: 'Maps Directions data.json (logical file size)', available: true,
+  dataBytes: 1048576, baselineBytes: 1044480, sessionDeltaBytes: 4096,
+  measuredAt: 1, browserCacheBytes: null, ...changes,
+});
+
+test('saved data HUD shows own file size and growth with the shared HTTP cache explicitly excluded', () => {
+  const control = new RouteStatusControl(), container = host();
+  control.update(element(container), data('road'), true, '', null, undefined, undefined, true,
+    tripSnapshot(), resourceSnapshot(), 'Eco', storageSnapshot());
+  const root = container.children[0], header = root.children[0], saved = header.children[4];
+  assert.equal(saved.textContent, 'Saved data 1.0 MiB · +4.0 KiB this session');
+  assert.equal(saved.hidden, false);
+  assert.equal(saved.style.display, '');
+  assert.match(saved.title, /Logical size of the addon data.json file only/);
+  assert.match(saved.title, /Shared browser\/map HTTP cache is excluded here/);
+  assert.match(saved.title, /this plugin session started/);
+  assert.equal(header.children[3].textContent, 'Eco · Window CPU 143.3% · Window RAM 1024 MiB');
+});
+
+test('unknown and shrinking saved data stay distinct from a measured zero without inserting HTML', () => {
+  const control = new RouteStatusControl(), container = host();
+  const update = (storage?: StorageSnapshot) => control.update(element(container), data('fallback'), true, '', null,
+    undefined, undefined, true, tripSnapshot(), undefined, 'Eco', storage);
+  update(storageSnapshot({ available: false, dataBytes: null, sessionDeltaBytes: null, scope: '<img src=x onerror=alert(1)>' }));
+  const root = container.children[0], header = root.children[0], saved = header.children[4];
+  assert.equal(saved.textContent, 'Saved data — · — this session');
+  assert.equal(saved.children.length, 0);
+  assert.equal(header.children.length, 6);
+  update(storageSnapshot({ dataBytes: 1047552, sessionDeltaBytes: -1024 }));
+  assert.equal(saved.textContent, 'Saved data 1023.0 KiB · -1.0 KiB this session');
+  update(storageSnapshot({ dataBytes: 0, sessionDeltaBytes: 0 }));
+  assert.equal(saved.textContent, 'Saved data 0 B · 0 B this session');
+  update();
+  assert.equal(saved.hidden, true);
+  assert.equal(saved.style.display, 'none');
+  assert.equal(saved.textContent, '');
+});
+
+test('unchanged storage bytes cause no text writes or rebuilt controls and preserve expanded help', () => {
+  const control = new RouteStatusControl(), container = host();
+  const update = (storage: StorageSnapshot) => control.update(element(container), data('fallback'), true, 'Waiting.', null,
+    undefined, undefined, true, tripSnapshot(), resourceSnapshot(), 'Eco', storage);
+  update(storageSnapshot());
+  const root = container.children[0], header = root.children[0], details = root.children[2], saved = header.children[4];
+  const writes = saved.textWrites;
+  details.open = true;
+  update(storageSnapshot({ measuredAt: 50 }));
+  assert.equal(saved.textWrites, writes);
+  assert.equal(container.children[0], root);
+  assert.equal(root.children[0], header);
+  assert.equal(header.children[4], saved);
+  assert.equal(root.children[2], details);
+  assert.equal(details.open, true);
+  update(storageSnapshot({ dataBytes: 2097152, sessionDeltaBytes: 1052672 }));
+  assert.equal(saved.textContent, 'Saved data 2.0 MiB · +1.0 MiB this session');
+  assert.ok(saved.textWrites > writes);
+  assert.equal(details.open, true);
+});
+
+test('distance-limited direct connections are excluded from progress without road success or a preparation action', () => {
+  const control = new RouteStatusControl(), container = host();
+  let clicks = 0;
+  const finished = tripSnapshot({ total: 2, eligible: 0, processed: 0, ready: 0, direct: 2, noPath: 0, unavailable: 0,
+    paused: 0, queued: 0, preparing: 0, percentComplete: 100, percentRemaining: 0, areasProcessed: 0, areasTotal: 0 });
+  control.update(element(container), data('direct', 'direct'), true, 'Above the selected distance limit.', () => clicks++,
+    undefined, undefined, false, finished, undefined, 'Eco', storageSnapshot());
+  const root = container.children[0], header = root.children[0], button = header.children[1], details = root.children[2];
+  assert.equal(header.children[0].textContent, 'Road routes: 0/0 eligible');
+  assert.equal(header.children[2].textContent, 'Processed 0/0 eligible connections (100%) · Remaining: 0 (0%) · Skipped by distance: 2');
+  assert.match(details.children[3].textContent, /Ready: 0/);
+  assert.match(details.children[3].textContent, /Skipped by distance: 2/);
+  assert.match(details.children[3].textContent, /No path: 0/);
+  assert.match(details.children[3].textContent, /Data unavailable: 0/);
+  assert.match(details.children[1].textContent, /above the distance limit are excluded from progress/);
+  assert.equal(button.hidden, true);
+  assert.equal(button.style.display, 'none');
+  assert.equal(button.disabled, true);
+  button.click();
+  assert.equal(clicks, 0);
+});
+
+test('mixed distance exclusions show eligible totals, remaining work and completion independently', () => {
+  const control = new RouteStatusControl(), container = host();
+  const update = (queue: TripQueueSnapshot) => control.update(element(container), data('road', 'fallback', 'direct', 'direct'), true, '', () => {},
+    undefined, undefined, true, queue);
+  update(tripSnapshot({ total: 4, eligible: 2, direct: 2, processed: 1, ready: 1, noPath: 0, unavailable: 0,
+    queued: 0, preparing: 0, paused: 1, percentComplete: 50, percentRemaining: 50 }));
+  const header = container.children[0].children[0];
+  assert.equal(header.children[0].textContent, 'Road routes: 1/2 eligible');
+  assert.equal(header.children[2].textContent, 'Processed 1/2 eligible connections (50%) · Remaining: 1 (50%) · Skipped by distance: 2');
+  assert.equal(header.children[1].textContent, 'Resume');
+  assert.equal(header.children[1].hidden, false);
+  update(tripSnapshot({ total: 4, eligible: 2, direct: 2, processed: 2, ready: 1, noPath: 1, unavailable: 0,
+    queued: 0, preparing: 0, paused: 0, percentComplete: 100, percentRemaining: 0 }));
+  assert.equal(header.children[2].textContent, 'Processed 2/2 eligible connections (100%) · Remaining: 0 (0%) · Skipped by distance: 2');
+  assert.equal(header.children[1].hidden, true);
+});
+
+test('shared geometry rendered by several groups uses the same deduplicated queue count for found and eligible paths', () => {
+  const control = new RouteStatusControl(), container = host();
+  const queue = tripSnapshot({ total: 1, eligible: 1, processed: 1, ready: 1, direct: 0,
+    noPath: 0, unavailable: 0, queued: 0, preparing: 0, paused: 0, percentComplete: 100, percentRemaining: 0 });
+  control.update(element(container), data('road', 'road'), true, '', null, undefined, undefined, true, queue);
+  const header = container.children[0].children[0];
+  assert.equal(header.children[0].textContent, 'Road routes: 1/1 eligible');
+  assert.equal(header.children[2].textContent, 'Processed 1/1 eligible connections (100%) · Remaining: 0 (0%) · Skipped by distance: 0');
+  control.update(element(container), data('road', 'road'), true, '', null);
+  assert.equal(header.children[0].textContent, 'Road routes: 2/2');
+});
+
+const sharedCacheSnapshot = (changes: Partial<SharedHttpCacheSnapshot> = {}): SharedHttpCacheSnapshot => ({
+  scope: 'Shared Obsidian HTTP cache (includes Maps and other plugins)', available: true,
+  bytes: 104857600, baselineBytes: 103809024, sessionDeltaBytes: 1048576, measuredAt: 1, ...changes,
+});
+
+test('shared HTTP cache is displayed separately with shared attribution and safe unavailable readings', () => {
+  const control = new RouteStatusControl(), container = host();
+  const update = (shared?: SharedHttpCacheSnapshot) => control.update(element(container), data('road'), true, '', null,
+    undefined, undefined, true, tripSnapshot(), undefined, 'Eco', storageSnapshot(), shared);
+  update(sharedCacheSnapshot());
+  const header = container.children[0].children[0], cache = header.children[5];
+  assert.equal(cache.textContent, 'Shared HTTP cache 100.0 MiB · +1.0 MiB this session');
+  assert.equal(header.children[4].textContent, 'Saved data 1.0 MiB · +4.0 KiB this session');
+  assert.match(cache.title, /current browser session/);
+  assert.match(cache.title, /unrelated plugins\/resources/);
+  assert.match(cache.title, /cannot be attributed to Maps Directions alone/);
+  update(sharedCacheSnapshot({ bytes: null, sessionDeltaBytes: null, available: false }));
+  assert.equal(cache.textContent, 'Shared HTTP cache — · — this session');
+  update(sharedCacheSnapshot({ bytes: 0, sessionDeltaBytes: -1048576 }));
+  assert.equal(cache.textContent, 'Shared HTTP cache 0 B · -1.0 MiB this session');
+  update();
+  assert.equal(cache.hidden, true);
+  assert.equal(cache.style.display, 'none');
+  assert.equal(cache.textContent, '');
 });

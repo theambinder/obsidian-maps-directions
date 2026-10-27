@@ -274,3 +274,75 @@ test('pauses abort immediately without leaving a long timer behind', async () =>
   controller.abort(); await assert.rejects(waiting, { name: 'AbortError' });
   await assert.rejects(tripPause(0, controller.signal), { name: 'AbortError' });
 });
+
+test('connections beyond the configured distance become direct without creating a map, worker or pause', async () => {
+  const long = connection('long'); long.to = [116.4, 34];
+  const subject = setup([long], { profile: profile({ pauseMs: 60000 }) });
+  subject.configuration.maxDistanceKm = 30;
+  await processTripQueue(subject.configuration);
+  assert.equal(subject.background.calls.length, 0);
+  assert.equal((subject.client as TestClient).calls.length, 0);
+  assert.equal(subject.ledger.get('long')?.state, 'direct');
+  assert.equal(subject.ledger.get('long')?.nextArea, 0);
+  assert.equal(subject.ledger.snapshot().direct, 1);
+  assert.equal(subject.ledger.snapshot().eligible, 0);
+  assert.equal(subject.ledger.snapshot().processed, 0);
+  assert.equal(subject.ledger.snapshot().ready, 0);
+  assert.equal(subject.ledger.snapshot().percentRemaining, 0);
+  assert.match(subject.ledger.get('long')?.reason ?? '', /30 km/);
+});
+
+test('distance skips do not stop short connections in the same itinerary', async () => {
+  const long = connection('long'); long.to = [116.4, 34];
+  const subject = setup([long, connection('short')], { client: new TestClient(() => ({ route: road })) });
+  subject.configuration.maxDistanceKm = 30;
+  await processTripQueue(subject.configuration);
+  assert.equal(subject.background.calls.length, 1);
+  assert.equal((subject.client as TestClient).calls.length, 1);
+  assert.equal(subject.ledger.get('long')?.state, 'direct');
+  assert.equal(subject.ledger.get('short')?.state, 'ready');
+  assert.equal(subject.ledger.snapshot().direct, 1);
+  assert.equal(subject.ledger.snapshot().ready, 1);
+  assert.equal(subject.ledger.snapshot().eligible, 1);
+  assert.equal(subject.ledger.snapshot().processed, 1);
+});
+
+test('an optional unlimited distance setting retains regional attempts for existing processor callers', async () => {
+  for (const limit of [undefined, null, 0]) {
+    const long = connection('long'); long.to = [116.4, 34];
+    const subject = setup([long]); subject.configuration.maxDistanceKm = limit;
+    await processTripQueue(subject.configuration);
+    assert.equal(subject.background.calls.length, 1);
+    assert.equal(subject.ledger.get('long')?.state, 'unavailable');
+    assert.equal(subject.ledger.snapshot().direct, 0);
+  }
+});
+
+test('a distance policy changed while waiting for the shared queue prevents any new road loading', async () => {
+  const serial = new PreparationQueue(), gateController = new AbortController();
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  const previous = serial.run(gateController.signal, () => gate);
+  const long = connection('long'); long.to = [116.4, 34];
+  const subject = setup([long], { serial }); let limit = 2000;
+  subject.configuration.maxDistanceKm = () => limit;
+  const operation = processTripQueue(subject.configuration);
+  await flush();
+  assert.equal(subject.ledger.get('long')?.state, 'preparing');
+  limit = 30; release(); await previous; await operation;
+  assert.equal(subject.background.calls.length, 0);
+  assert.equal((subject.client as TestClient).calls.length, 0);
+  assert.equal(subject.ledger.get('long')?.state, 'direct');
+});
+
+test('lowering the distance while a worker is active cannot replace the direct line with a late path', async () => {
+  const client = new DeferredClient();
+  const long = connection('long'); long.to = [116.4, 34];
+  const subject = setup([long], { client }); let limit = 2000;
+  subject.configuration.maxDistanceKm = () => limit;
+  const operation = processTripQueue(subject.configuration);
+  await flush(); assert.equal(client.calls.length, 1);
+  limit = 30; client.finish(0, road); await operation;
+  assert.equal(subject.ledger.get('long')?.state, 'direct');
+  assert.equal(subject.ledger.get('long')?.route, undefined);
+  assert.equal(subject.found.length, 0);
+});

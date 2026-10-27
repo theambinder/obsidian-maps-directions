@@ -4,7 +4,7 @@ import { PreparationQueue } from './auto-preparation';
 import { DetailedRoadMemory } from './detailed-road-memory';
 import type { RoutingClient } from './local-routing-client';
 import type { RoadRoute } from './routing-protocol';
-import { planTripConnection, subdivideTripArea, TripQueue } from './trip-queue';
+import { exceedsRoadDistance, roadDistanceLimitReason, planTripConnection, subdivideTripArea, TripQueue } from './trip-queue';
 import type { WorkloadProfile } from './workload-settings';
 
 export interface TripProcessorProgress { key: string; completed: number; total: number; message: string }
@@ -21,6 +21,8 @@ export interface TripProcessorOptions {
   visible?: () => boolean;
   onProgress?: (progress: TripProcessorProgress) => void;
   onRoute?: (key: string, route: RoadRoute) => void;
+  /** null/undefined/zero leaves road distance unlimited for existing callers. */
+  maxDistanceKm?: number | null | (() => number | null);
 }
 
 function workingLimit(profile: WorkloadProfile): string {
@@ -41,12 +43,21 @@ export function tripPause(ms: number, signal: AbortSignal): Promise<void> {
 export async function processTripQueue(options: TripProcessorOptions): Promise<void> {
   const { ledger, client, signal } = options;
   let activeKey: string | null = null;
+  const distanceLimit = (): number | null | undefined => typeof options.maxDistanceKm === 'function' ? options.maxDistanceKm() : options.maxDistanceKm;
+  const directIfOverLimit = (task: { key: string; from: [number, number]; to: [number, number] }): boolean => {
+    const limit = distanceLimit();
+    if (!exceedsRoadDistance(task.from, task.to, limit)) return false;
+    ledger.setDirect(task.key, roadDistanceLimitReason(task.from, task.to, limit!));
+    options.onProgress?.({ key: task.key, completed: 0, total: 0, message: 'Straight connection: road calculation distance limit.' });
+    return true;
+  };
   const stopWorker = (): void => client.cancel();
   signal.addEventListener('abort', stopWorker, { once: true });
   try {
     while (!signal.aborted) {
       const task = ledger.next(options.keys);
       if (!task) break;
+      if (directIfOverLimit(task)) continue;
       if (options.visible && !options.visible()) throw abortError();
       if (!ledger.start(task.key)) continue;
       activeKey = task.key;
@@ -65,6 +76,7 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
           options.onProgress?.({ key: task.key, completed: start, total: current.areas.length, message: `Preparing connection: ${start}/${current.areas.length} areas.` });
           const result = await options.serial.run(signal, async () => {
             if (signal.aborted || options.visible && !options.visible()) throw abortError();
+            if (directIfOverLimit(task)) return { completed: 0, total: 0, ready: 0, timedOut: false };
             return (options.run ?? prepareBackgroundRoads)(options.original, chunk, {
               factory: options.factory, signal,
               viewportWidth: profile.viewportWidth, viewportHeight: profile.viewportHeight, tileCacheSize: profile.tileCacheSize,
@@ -75,6 +87,7 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
               },
               onSnapshot: async (snapshot, chunkSignal, area) => {
                 if (signal.aborted || chunkSignal.aborted || ledger.get(task.key)?.state !== 'preparing') return false;
+                if (directIfOverLimit(task)) return false;
                 const index = start + (area?.index ?? 0);
                 if (area?.waitTimedOut) unavailableAreas++;
                 if (snapshot.state === 'limited') {
@@ -95,6 +108,7 @@ export async function processTripQueue(options: TripProcessorOptions): Promise<v
                 try {
                   const result = await client.route(roads, [{ from: task.from, to: task.to }]);
                   if (signal.aborted || chunkSignal.aborted || ledger.get(task.key)?.state !== 'preparing') return false;
+                  if (directIfOverLimit(task)) return false;
                   const route = result.routes[0];
                   workerLimited ||= result.stats.truncated;
                   if (route && route.coordinates.length >= 2 && Number.isFinite(route.distance)) {

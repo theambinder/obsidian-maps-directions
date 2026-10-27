@@ -21,7 +21,7 @@ layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.6.0 is a testing prerelease, not an Obsidian directory submission.
+Version 0.6.1 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -31,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.6.0.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.6.1.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -49,8 +49,11 @@ The installation ZIP is `dist/maps-directions-0.6.0.zip`. You can also copy
    the background. **Automatically prepare roads** is on by default. Progress
    and **Pause/Resume** controls show the saved queue state; the visible map
    stays in place. **Road routes: N/total** counts found paths, while preparation
-   progress separately shows processed connections and the percentage remaining.
+   progress separately shows processed eligible connections and the percentage
+   remaining. Distance-excluded connections are counted separately.
    The **Routes** legend identifies each group and its line color.
+   The global **Maximum road-routing distance (km)** defaults to 30 km; longer
+   connections stay straight and do not load roads for calculation.
 
 Connections are disabled by default for existing views. **Straight line** remains
 the default route mode, including for bases created by version 0.1.0. Settings are
@@ -158,13 +161,26 @@ between adjacent stops, rather than route groups. One Day 1 group with five stop
 has four connections. Short access lines between pins and their road paths do
 not add to that count.
 
-Preparation progress is separate: it shows how many connections were processed
-and what percentage remains. **100% processed does not mean every connection
-found a road path.** Result counts distinguish:
+Preparation progress is separate: it shows processed **eligible** connections,
+the remaining eligible count and the percentage remaining. Connections excluded
+by the distance preference are displayed as **Skipped by distance** and are not
+included in either the numerator or denominator of road-processing progress.
+
+The eligible total is all connections minus distance-excluded connections.
+Processed eligible connections are **Ready**, **No walking path** and **Data
+unavailable**; queued, preparing and paused connections remain unfinished. When
+all eligible connections have been processed, progress is 100% even if some other
+connections intentionally remain straight. If every connection is excluded, there
+is nothing to calculate: progress is 100% with zero remaining. **100% processed
+does not mean every eligible connection found a road path.** Result counts distinguish:
 
 - **Queued** — this connection has not been processed yet.
 - **Preparing** — its road data is being loaded or searched.
 - **Ready** — a road path was found and saved.
+- **Straight (distance limit)** — this connection is longer than the configured
+  endpoint-distance threshold, so it is intentionally drawn straight without
+  road preparation. It is counted separately as skipped by distance and excluded
+  from road-processing progress, rather than counted as a found or failed search.
 - **No walking path** — a completed local attempt did not find a path with the
   available detailed network.
 - **Data unavailable** — the available road detail is insufficient, a source or
@@ -211,9 +227,28 @@ is needed for road data absent from Maps cache.
 
 ## Global processing settings
 
-Open **Settings → Maps Directions** to choose a processing mode and the pause
-between chunks. **Eco** is the default. These preferences apply across map views;
+Open **Settings → Maps Directions** to choose the maximum routing distance, a
+processing mode and the pause between chunks. **Eco** is the default. These preferences apply across map views;
 they are not added to each map's Directions configuration.
+
+**Maximum road-routing distance (km)** defaults to **30**. The distance is the
+straight-line, great-circle separation between each pair of consecutive stops,
+not the length of a road path that has yet to be calculated. Connections strictly
+longer than the threshold use a straight line and enter **Straight (distance
+limit)**. No road-loading or path-search job is started for them, including on an
+explicit retry. Exactly-at-threshold connections remain eligible. Set **0** to
+disable the distance threshold. Changing this setting recalculates the eligible
+progress total; distance-excluded connections never inflate the completion count.
+
+The limit also applies to already saved paths: above-threshold connections are
+shown straight while the preference is active. Previously calculated geometry is
+kept, so raising or disabling the threshold can restore that path without
+calculating it again. Connections that have not previously been calculated enter
+the normal queue when they become eligible. Changing processing mode or pause
+preserves the distance setting.
+
+This is an explicit per-connection preference, not a hidden cap on the number of
+connections in the trip.
 
 | Mode | Areas per chunk | Default pause | Hidden viewport | Tile cache | Working road lines / coordinates | Worker timeout |
 | --- | ---: | ---: | --- | ---: | --- | ---: |
@@ -252,9 +287,10 @@ MapLibre map supplied by the installed Maps runtime and the current background's
 transport vector sources. It copies no marker sources, note data, sprites or
 icons. The visible map's camera, style and markers remain unchanged.
 
-Each connection receives an adaptive overview, corridor and endpoint plan. Long
-connections are not silently reduced to endpoint-only loads by a 30 km rule.
-Their regional overview may still be insufficient for a complete walking path;
+Each eligible connection receives an adaptive overview, corridor and endpoint
+plan. Connections over the configured distance threshold are intentionally drawn
+straight before planning or loading road areas. When the threshold is raised or
+disabled, a long connection's regional overview may still be insufficient for a complete walking path;
 that outcome is shown as **Data unavailable**, with an explanation, rather than
 proof that no route exists. A dense area is subdivided into smaller overlapping
 views up to street detail level 16. If it still exceeds the working budget, the
@@ -291,8 +327,8 @@ existing files. **Maps Directions: Check local routing** reports current status.
 ## Resource measurements
 
 The on-map monitor reports preparation progress and available CPU/private-memory
-measurements. These measurements refer to the **Obsidian window process**,
-including its other plugins and contents. They are not isolated addon usage, and
+measurements, plus separately scoped storage information. CPU and memory readings
+refer to the **Obsidian window process**, including its other plugins and contents. They are not isolated addon usage, and
 exclude the GPU process and other application processes.
 
 CPU uses cumulative process time over the sample interval. **100% means one CPU
@@ -307,6 +343,42 @@ include unrelated activity in the same window, so comparing an idle baseline and
 a processing run is more informative than treating every change as plugin-only
 cost. Brief final samples are excluded from instantaneous peak calculation to
 avoid misleading timing-resolution spikes.
+
+## Disk usage
+
+The storage monitor measures the logical byte size of this addon's
+`.obsidian/plugins/maps-directions/data.json` file using the vault adapter's file
+statistics. It shows the current saved-data size and a signed change since the
+first successful measurement in the current plugin session. Restarting the addon
+starts a new comparison baseline. A negative change means the file became smaller;
+it is not a download counter. Unsupported file statistics are shown as unavailable.
+
+That file contains preferences, queue metadata, area plans, progress, retry
+metadata and saved route coordinates. More stored connections or more detailed
+saved paths can make it grow. Distance alone does not determine its size: the
+number of areas, coordinate vertices and retained results matters. Working road
+lines and the search graph are temporary RAM data, not an addon-managed tile
+archive on disk.
+
+Map preparation can also fetch tile and metadata responses through Maps' existing
+providers. Chromium's shared HTTP cache may retain responses according to their
+cache policy. This is separate from the addon's `data.json` and the temporary
+in-memory tile cache.
+
+On supported desktop installations, a separate **Shared HTTP cache** counter
+uses Electron's current-session cache-size API. It shows the reported cache bytes
+and a signed change since the first successful measurement in the current plugin
+session, refreshed periodically. It includes all HTTP resources in that shared
+Obsidian browser session, including requests unrelated to Maps or this addon.
+It is not a Maps-only counter, and a change cannot be attributed to route
+preparation alone. When the API is unavailable, the value remains unknown rather
+than zero. Reading this counter does not clear shared cached responses.
+
+The saved-data file statistic and Electron's cache-size counter are logical byte
+measurements, not guarantees about physically allocated disk blocks. They do not
+include cloud sync history, every Obsidian/plugin file or other browser sessions.
+The two counters remain separate rather than being presented as the plugin's
+complete disk footprint.
 
 ## Ordering and filters
 

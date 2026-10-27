@@ -8,6 +8,8 @@ import { TripQueue } from './trip-queue';
 import { ResourceSampler } from './resource-sampler';
 import { readWorkloadSettings, workloadProfile, type WorkloadSettings } from './workload-settings';
 import { MapsDirectionsSettingTab } from './workload-settings-tab';
+import { StorageUsageTracker, refreshStorageUsage } from './storage-usage';
+import { SharedHttpCacheMonitor } from './shared-http-cache';
 
 export default class MapsDirectionsPlugin extends Plugin {
   private adapter!: MapsAdapter;
@@ -20,6 +22,8 @@ export default class MapsDirectionsPlugin extends Plugin {
   private workload: WorkloadSettings = readWorkloadSettings(undefined);
   private readonly resources = new ResourceSampler({ onChange: () => { if (this.active && this.adapter) this.adapter.refreshViews(); } });
   private readonly preparationQueue = new PreparationQueue();
+  private readonly storage = new StorageUsageTracker(() => { if (this.active && this.adapter) this.adapter.refreshViews(); });
+  private readonly sharedCache = new SharedHttpCacheMonitor({ onChange: () => { if (this.active && this.adapter) this.adapter.refreshViews(); } });
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
 
@@ -27,6 +31,7 @@ export default class MapsDirectionsPlugin extends Plugin {
     this.active = true;
     let saved: unknown;
     try { saved = await this.loadData(); } catch { /* An unreadable cache must not prevent Maps from opening. */ }
+    await refreshStorageUsage(this.app.vault.adapter, this.dataFilePath(), this.storage);
     this.routeCache = new RoadRouteCache(saved, () => this.scheduleCacheSave());
     this.automaticPolicy = new AutoPreparationPolicy(saved && typeof saved === 'object' ? (saved as Record<string, unknown>).automaticAttempts : undefined, () => this.scheduleCacheSave());
     const stored = saved && typeof saved === 'object' ? saved as Record<string, unknown> : {};
@@ -34,10 +39,10 @@ export default class MapsDirectionsPlugin extends Plugin {
     this.workload = readWorkloadSettings(stored.workload);
     this.addSettingTab(new MapsDirectionsSettingTab(this.app, this, () => this.workload, async value => {
       this.workload = readWorkloadSettings(value); this.saveCache(); this.adapter.workloadChanged();
-    }));
+    }, () => this.storage.snapshot(), () => this.sharedCache.snapshot()));
     this.adapter = new MapsAdapter(
       this.app,
-      view => new DirectionsOverlay(view, error => this.reportOverlayError(error), undefined, this.routeCache, { policy: this.automaticPolicy, queue: this.preparationQueue, tripQueue: this.tripQueue, workload: () => workloadProfile(this.workload), resources: () => this.resources.snapshot() }),
+      view => new DirectionsOverlay(view, error => this.reportOverlayError(error), undefined, this.routeCache, { policy: this.automaticPolicy, queue: this.preparationQueue, tripQueue: this.tripQueue, workload: () => workloadProfile(this.workload), resources: () => this.resources.snapshot(), storage: () => this.storage.snapshot(), sharedCache: () => this.sharedCache.snapshot() }),
       status => {
         this.status = status;
         if (status.state === 'incompatible' && !this.reported.has(status.message)) {
@@ -50,9 +55,11 @@ export default class MapsDirectionsPlugin extends Plugin {
       this.active = false;
       this.adapter.stop();
       void this.resources.stop();
+      this.sharedCache.stop();
       if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; this.saveCache(); }
     });
     this.resources.start();
+    await this.sharedCache.start();
     this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.adapter.refreshViews()));
     this.app.workspace.onLayoutReady(() => { if (this.active) this.adapter.start(); });
 
@@ -93,6 +100,11 @@ export default class MapsDirectionsPlugin extends Plugin {
     });
   }
 
+  private dataFilePath(): string {
+    const directory = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    return `${directory}/data.json`;
+  }
+
   private scheduleCacheSave(): void {
     if (!this.active) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
@@ -101,7 +113,11 @@ export default class MapsDirectionsPlugin extends Plugin {
 
   private saveCache(): void {
     const data = { ...this.routeCache.serialize(), automaticAttempts: this.automaticPolicy.serialize(), tripQueue: this.tripQueue.serialize(), workload: this.workload };
-    this.saveQueue = this.saveQueue.catch(() => {}).then(() => this.saveData(data)).catch(error => {
+    this.saveQueue = this.saveQueue.catch(() => {}).then(async () => {
+      await this.saveData(data);
+      await refreshStorageUsage(this.app.vault.adapter, this.dataFilePath(), this.storage);
+      if (this.active) void this.sharedCache.sampleNow();
+    }).catch(error => {
       console.error('Maps Directions: could not save local route cache', error);
     });
   }

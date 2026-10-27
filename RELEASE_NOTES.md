@@ -1,43 +1,40 @@
-# Maps Directions 0.6.0
+# Maps Directions 0.6.1
 
-Testing prerelease for official Maps 0.2.2.
+Testing prerelease for official Maps 0.2.2. Algorithm tuning remains in the 0.6.x
+release series.
 
-- Replace whole-itinerary cut-offs with a saved per-connection queue. Process
-  connections in small chunks without silently discarding the remaining trip
-  after 64 map areas, 200 connections or two minutes.
-- Persist task state, reasons, area plans and completed route geometry. Previously
-  completed connections stay available after reopening or restarting. An unfinished
-  connection rebuilds its temporary road network; a user-paused task stays paused.
-- Show processed percentage and percentage remaining separately from the count
-  of found road paths. Distinguish Queued, Preparing, Ready, No walking path,
-  Data unavailable and Paused. Processing completion does not promise every route
-  was found.
-- Add Pause/Resume. A working-data or computation limit pauses the affected
-  connection with an explicit reason while other queued connections can continue.
-  Resume uses the current processing mode and does not silently raise budgets.
-- Add global Settings → Maps Directions controls for Processing mode and Pause
-  between chunks. Default Eco uses two areas per chunk, a one-second pause,
-  a 768 × 512 viewport, eight cached tiles and up to 6,000 road lines/50,000
-  coordinates. Balanced and Maximum offer larger working profiles.
-- Use adaptive per-connection overview, corridor and endpoint plans, replacing
-  the silent 30 km endpoint-only rule. Split dense areas into smaller views up to
-  zoom 16; report insufficient regional detail or working-data limits honestly.
-- Store durable completed paths in the trip ledger, independently of the bounded
-  opportunistic cache. There is no silent 500-path eviction of completed trip data.
-- Show available CPU and private-memory measurements for the Obsidian window
-  process, including other plugins. CPU 100% equals one core equivalent and can
-  exceed 100%; memory uses MiB. GPU and other application processes are excluded.
-- Preserve original Maps markers, backgrounds, categorical route colors, arrows
-  and the route legend. No separate routing service or map engine is bundled.
+- Add global Maximum road-routing distance (km), default 30. Use the straight-line
+  great-circle separation between consecutive markers before loading road data.
+  Connections strictly above the threshold stay straight without a road search;
+  0 disables the threshold. Exactly-at-threshold connections remain eligible.
+- Distinguish intentional straight connections from No walking path and Data
+  unavailable. Show their count separately as Skipped by distance. Exclude them
+  from both the processed count and eligible total used for road-processing
+  percentages; they are not counted as found paths or failed searches.
+- Show processed eligible connections, remaining eligible count and percentage
+  remaining. All eligible work finished means 100%; an all-distance-excluded
+  map has nothing to calculate and shows zero remaining, without a false failure.
+- Apply the preference to queued and already calculated connections. Keep saved
+  road geometry so increasing or disabling the threshold can restore existing
+  results; newly eligible connections enter the normal saved queue.
+- Preserve the distance preference when changing processing mode or pause. Eco
+  and the one-second default pause remain unchanged.
+- Track the logical size of Maps Directions data.json and its signed change
+  since the first successful measurement in the current plugin session. Measure
+  the actual saved file after writes rather than presenting RAM estimates as
+  disk use. Unsupported measurements remain unknown.
+- Add a separate Shared HTTP cache counter when Electron's current-session
+  cache-size API is available. Show reported cache bytes and the signed change
+  since the first successful measurement in the current plugin session. This
+  includes all HTTP resources in the shared Obsidian browser session, not only
+  Maps or Directions requests; unavailable APIs remain unknown rather than zero.
+- Keep storage scopes explicit. The addon saves queue/progress and route geometry;
+  temporary working road networks remain in RAM. Chromium may retain tile
+  responses according to cache policy. The shared cache is not included in the
+  saved-data counter and cannot be attributed to route preparation alone. Neither
+  logical counter is a claim about physically allocated disk blocks or complete
+  application disk use. No shared cache is cleared.
 
-Preparing road data can use network bandwidth, CPU, GPU memory and battery.
-Processing mode describes concrete working limits, not a guaranteed CPU or RAM
-percentage. Eco reduces average activity through smaller work and pauses; it can
-still briefly occupy a core. Queue metadata and saved paths grow on disk with
-completed work, while temporary road networks are not saved to disk.
-
-Map background data may be fetched from the current provider when absent from
-Maps cache. Walking routing remains approximate. Coarse regional geometry,
-missing connections, ferries and transport legs can remain unresolved even after
-all queued connections are processed. Correct automobile navigation is not added
-in this release. Mobile visual validation is still pending.
+Original Maps markers, backgrounds, route colors and arrows remain under their
+existing controls. Local walking routing is approximate; this release does not
+add driving directions, a routing service or an offline road database.

@@ -14,10 +14,12 @@ import { prepareBackgroundRoads, buildRoadPreparationStyle, type BackgroundMapFa
 import { getBackgroundMapFactory } from './adapter';
 import { planRoadPreparation } from './road-preparation-targets';
 import { AutoPreparationPolicy, PreparationQueue, autoPreparationKey } from './auto-preparation';
-import { TripQueue, planTripConnection, tripConnectionKey } from './trip-queue';
+import { TripQueue, planTripConnection, tripConnectionKey, exceedsRoadDistance, roadDistanceLimitReason } from './trip-queue';
 import { processTripQueue } from './trip-processor';
 import { workloadProfile, DEFAULT_WORKLOAD_SETTINGS, type WorkloadProfile } from './workload-settings';
 import type { ResourceSnapshot } from './resource-sampler';
+import type { StorageSnapshot } from './storage-usage';
+import type { SharedHttpCacheSnapshot } from './shared-http-cache';
 
 interface PreparationServices {
   factory?: (map: MapLike) => BackgroundMapFactory | null;
@@ -29,6 +31,8 @@ interface PreparationServices {
   tripQueue?: TripQueue;
   workload?: () => WorkloadProfile;
   resources?: () => ResourceSnapshot;
+  storage?: () => StorageSnapshot;
+  sharedCache?: () => SharedHttpCacheSnapshot;
 }
 
 export const RESOURCE_PREFIX = 'obsidian-maps-directions-';
@@ -168,7 +172,7 @@ export class DirectionsOverlay implements OverlayLike {
       const colored = colorDirections(this.connectionData(map, directData, options.routeMode), this.view.markerManager.markers, { ...options, normalizeColor: this.normalizeColor, palette: this.routePalette });
       const host = map.getContainer?.() ?? null;
       this.legend.update(host, colored, !!options.groupProperty);
-      this.statusControl.update(host, colored, options.routeMode === 'local', this.routingStatus, this.roads?.state !== 'unsupported' && this.preparationFactory(map) ? () => { void this.prepareRoadRoutes(false, false); } : null, this.preparationProgress, () => { this.cancelPreparation(true); this.update(); }, options.autoPrepare, this.preparationServices.tripQueue?.snapshot(this.smartKeys), this.preparationServices.resources?.(), this.currentWorkload().label);
+      this.statusControl.update(host, colored, options.routeMode === 'local', this.routingStatus, this.roads?.state !== 'unsupported' && this.preparationFactory(map) ? () => { void this.prepareRoadRoutes(false, false); } : null, this.preparationProgress, () => { this.cancelPreparation(true); this.update(); }, options.autoPrepare, this.preparationServices.tripQueue?.snapshot(this.smartKeys), this.preparationServices.resources?.(), this.currentWorkload().label, this.preparationServices.storage?.(), this.preparationServices.sharedCache?.());
       const data: FeatureCollection = { type: 'FeatureCollection', features: colored.features.map(feature => ({
         ...feature, properties: { ...feature.properties, arrowImage: `${this.imageId}-${String(feature.properties.lineColor).slice(1)}` },
       })) };
@@ -372,14 +376,15 @@ export class DirectionsOverlay implements OverlayLike {
 
   private smartConnections(map: MapLike, direct: FeatureCollection): FeatureCollection {
     const ledger = this.preparationServices.tripQueue!;
-    const input = JSON.stringify([direct.features.map(feature => feature.geometry.coordinates), this.preparationContext(map)]);
+    const maxDistanceKm = this.currentWorkload().maxDistanceKm;
+    const input = JSON.stringify([direct.features.map(feature => feature.geometry.coordinates), this.preparationContext(map), maxDistanceKm]);
     const routeInput = JSON.stringify(direct);
     if (this.preparationController && this.preparationInput !== routeInput) this.cancelPreparation();
     if (this.smartInput !== input) {
       this.smartInput = input;
       const connections = direct.features.map(feature => {
         const [from, to] = feature.geometry.coordinates;
-        return { key: tripConnectionKey(from, to, this.preparationContext(map)), from, to, areas: planTripConnection(from, to).areas };
+        return { key: tripConnectionKey(from, to, this.preparationContext(map)), from, to, areas: exceedsRoadDistance(from, to, maxDistanceKm) ? [] : planTripConnection(from, to).areas };
       });
       ledger.reconcile(connections);
       this.smartKeys = connections.map(connection => connection.key);
@@ -387,8 +392,21 @@ export class DirectionsOverlay implements OverlayLike {
     }
     const current = new Set(this.smartRouteKeys);
     for (const key of this.retainedRoutes.keys()) if (!current.has(key)) this.retainedRoutes.delete(key);
+    const intentionalStraight = new Set<string>();
     this.smartKeys.forEach((key, index) => {
       const routeKey = this.smartRouteKeys[index];
+      const [from, to] = direct.features[index].geometry.coordinates;
+      if (exceedsRoadDistance(from, to, maxDistanceKm)) {
+        if (ledger.status(key)?.state !== 'direct') {
+          const saved = this.retainedRoutes.get(routeKey) ?? this.routeCache.get(routeKey);
+          if (saved && ledger.status(key)?.state !== 'ready') ledger.finish(key, 'ready', 'Restored saved path.', saved);
+        }
+        ledger.setDirect(key, roadDistanceLimitReason(from, to, maxDistanceKm));
+        this.retainedRoutes.delete(routeKey);
+        intentionalStraight.add(routeKey);
+        return;
+      }
+      if (ledger.status(key)?.state === 'direct') ledger.restoreDirect(key, planTripConnection(from, to).areas);
       if (this.retainedRoutes.has(routeKey)) {
         if (ledger.status(key)?.state !== 'ready') ledger.finish(key, 'ready', 'Restored retained path.', this.retainedRoutes.get(routeKey)!);
         return;
@@ -398,10 +416,12 @@ export class DirectionsOverlay implements OverlayLike {
       if (route) { this.retainedRoutes.set(routeKey, route); if (task?.state !== 'ready') ledger.finish(key, 'ready', 'Restored saved path.', route); }
     });
     const result = applyRoadRoutes(direct, { id: 0, routes: this.smartRouteKeys.map(key => this.retainedRoutes.get(key) ?? null), stats: { nodes: 0, edges: 0, truncated: false } });
+    result.features = result.features.map(feature => feature.properties.connectionKind === 'fallback' && intentionalStraight.has(routeKey(feature)) ? { ...feature, properties: { ...feature.properties, connectionKind: 'direct' } } : feature);
     this.routedData = result;
     const progress = ledger.snapshot(this.smartKeys);
     const paused = this.smartKeys.map(key => ledger.status(key)).find(task => task?.state === 'paused');
-    this.routingStatus = `Processed ${progress.processed}/${progress.total} connections; ${progress.percentRemaining}% remaining. Found ${progress.ready} road paths. ${progress.noPath} no walking path; ${progress.unavailable} data unavailable; ${progress.paused} paused.${paused?.reason ? ` ${paused.reason}` : ''}`;
+    const eligible = progress.eligible ?? progress.total - (progress.direct ?? 0);
+    this.routingStatus = `Processed ${progress.processed}/${eligible} eligible connections (${progress.percentComplete}%); ${Math.max(0, eligible - progress.processed)} remaining (${progress.percentRemaining}%). Skipped by distance: ${progress.direct ?? 0}. Found ${progress.ready} road paths; ${progress.noPath} no walking path; ${progress.unavailable} data unavailable; ${progress.paused} paused.${paused?.reason ? ` ${paused.reason}` : ''}`;
     return result;
   }
 
@@ -444,7 +464,7 @@ export class DirectionsOverlay implements OverlayLike {
       await processTripQueue({
         original: map, keys: [...this.smartKeys], ledger, serial: this.preparationQueue, factory,
         client: this.routingClient, profile: () => this.currentWorkload(), signal: controller.signal,
-        run: this.preparationServices.run, visible: () => !automatic || this.mapVisible(map),
+        run: this.preparationServices.run, visible: () => !automatic || this.mapVisible(map), maxDistanceKm: () => this.currentWorkload().maxDistanceKm,
         onProgress: progress => {
           if (this.destroyed || controller.signal.aborted || this.preparationController !== controller) return;
           this.preparationProgress = { running: true, completed: progress.completed, total: progress.total, message: progress.message };

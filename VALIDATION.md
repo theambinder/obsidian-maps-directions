@@ -1,3 +1,44 @@
+# Validation — Maps Directions 0.6.1
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.
+
+- All 307 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- The global road-routing distance defaults to 30 km and measures straight-line
+  great-circle separation between consecutive stops. Strictly longer connections
+  use intentional straight lines without allocating a preparation map or worker.
+  Zero disables the threshold; exactly-at-threshold connections remain eligible.
+- Production-map progress counts only eligible connections. Distance-skipped
+  connections have their own visible count and are excluded from processed tasks,
+  the denominator and area totals. All eligible work finished shows 100%; all-direct
+  views have zero remaining. Paused work remains unfinished and resumable.
+- Progress remains below 100% while any eligible task is unfinished, including
+  large queues where ordinary rounding would hide the last task. Found/eligible
+  counters use matching deduplicated queue tasks for geometry shared by groups.
+- Model, processor and production-overlay regressions cover mixed pending/ready/
+  direct work, persisted exclusions, changing the threshold during a worker search,
+  restoration of previous outcomes, preserved geometry and no unnecessary reload.
+- Native Settings and the working map show the default threshold, eligible progress,
+  skipped count, own saved-file size and a separate shared HTTP-cache reading.
+- Increasing or disabling the threshold restores retained completed road geometry;
+  lowering it hides that geometry while keeping it available for later reuse.
+  Existing paused and failed outcomes are preserved rather than retried implicitly.
+- Own storage measurements stat only the addon data.json file after successful
+  saves. The signed session delta stays in memory and is never persisted into the
+  file being measured. Missing/unsupported readings remain distinct from zero.
+- The optional Electron shared-session HTTP-cache counter is sampled every 30
+  seconds, deduplicates overlapping reads and rejects late updates after unload.
+  Its scope explicitly includes Maps and unrelated resources/plugins. It is not
+  attributed to the addon alone or presented as allocated disk blocks or all
+  application storage. No cache scanning, deletion or clearing is performed.
+- Native reload restored durable outcomes without repeating completed work or
+  leaving a temporary map. Global Eco preferences, existing map settings and
+  original Maps resources remain intact.
+- No personal vault files, trip coordinates, benchmark data or local measurements
+  are included in the published sources or release package. Algorithm tuning stays
+  within the 0.6.x release series.
+
+---
+
 # Validation — Maps Directions 0.6.0
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.

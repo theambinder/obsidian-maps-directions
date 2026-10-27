@@ -1,7 +1,7 @@
 import { autoPreparationKey } from './auto-preparation';
 import { roadDistance, type RoadCoordinate, type RoadRoute } from './road-graph';
 
-export type TripTaskState = 'queued' | 'preparing' | 'ready' | 'no-path' | 'unavailable' | 'paused';
+export type TripTaskState = 'queued' | 'preparing' | 'ready' | 'no-path' | 'unavailable' | 'paused' | 'direct';
 export type TripTaskResult = 'ready' | 'no-path' | 'unavailable';
 export interface TripArea { center: RoadCoordinate; zoom: number; stage: 'overview' | 'corridor' | 'endpoint' }
 export interface TripConnection { key: string; from: RoadCoordinate; to: RoadCoordinate; areas: TripArea[] }
@@ -14,12 +14,19 @@ export interface TripTask extends TripConnection {
   restarted?: boolean;
   /** Durable path geometry prevents a small opportunistic cache from evicting trip results. */
   route?: RoadRoute;
+  /** Outcome restored when the distance policy later makes this connection eligible. */
+  distancePreviousState?: Exclude<TripTaskState, 'direct'>;
+  distancePreviousReason?: string;
 }
 export interface TripQueueData { version: 1; tasks: TripTask[] }
 export interface TripQueueSnapshot {
   total: number; processed: number; ready: number; noPath: number; unavailable: number;
   paused: number; queued: number; preparing: number; percentComplete: number;
   percentRemaining: number; areasProcessed: number; areasTotal: number;
+  /** Straight connections deliberately excluded from road calculation and progress. */
+  direct?: number;
+  /** Connections included in road calculation progress; excludes direct connections. */
+  eligible?: number;
 }
 export interface TripConnectionPlan {
   areas: TripArea[];
@@ -29,8 +36,8 @@ export interface TripConnectionPlan {
   detailedCoverage: boolean;
 }
 
-const STATES = new Set<TripTaskState>(['queued', 'preparing', 'ready', 'no-path', 'unavailable', 'paused']);
-const RESULTS = new Set<TripTaskState>(['ready', 'no-path', 'unavailable']);
+const STATES = new Set<TripTaskState>(['queued', 'preparing', 'ready', 'no-path', 'unavailable', 'paused', 'direct']);
+const RESULTS = new Set<TripTaskState>(['ready', 'no-path', 'unavailable', 'direct']);
 const STAGES = new Set<TripArea['stage']>(['overview', 'corridor', 'endpoint']);
 const EARTH = 6371008.8;
 const WORLD = 2 * Math.PI * EARTH;
@@ -73,6 +80,16 @@ export function tripConnectionKey(from: RoadCoordinate, to: RoadCoordinate, sour
   return autoPreparationKey(JSON.stringify([cleanPoint(from), cleanPoint(to)]), `trip-queue-v1:${sourceContext}`);
 }
 
+/** The setting measures the geodesic straight-line distance before any road search. */
+export function exceedsRoadDistance(from: RoadCoordinate, to: RoadCoordinate, maxDistanceKm?: number | null): boolean {
+  return typeof maxDistanceKm === 'number' && Number.isFinite(maxDistanceKm) && maxDistanceKm > 0 &&
+    roadDistance(from, to) / 1000 > maxDistanceKm;
+}
+
+export function roadDistanceLimitReason(from: RoadCoordinate, to: RoadCoordinate, maxDistanceKm: number): string {
+  return `Straight line: ${(roadDistance(from, to) / 1000).toFixed(1)} km exceeds the ${maxDistanceKm} km road calculation limit.`;
+}
+
 /**
  * A resumable itinerary ledger. There is no cap on the number of trip connections.
  * Completed outcomes are durable. Only an unfinished connection replays its small
@@ -93,6 +110,11 @@ export class TripQueue {
       if (task.state === 'ready' && !task.route) { task.state = 'queued'; task.nextArea = 0; task.reason = 'Saved route data unavailable.'; }
       task.from = cleanPoint(task.from); task.to = cleanPoint(task.to);
       task.reason = reasonText(task.reason);
+      const previousState: unknown = original.distancePreviousState;
+      if (task.state === 'direct' && typeof previousState === 'string' && previousState !== 'direct' && STATES.has(previousState as TripTaskState)) {
+        task.distancePreviousState = previousState as Exclude<TripTaskState, 'direct'>;
+        task.distancePreviousReason = reasonText(original.distancePreviousReason);
+      } else { delete task.distancePreviousState; delete task.distancePreviousReason; }
       if (task.state === 'preparing' || task.state === 'queued') {
         task.restarted = task.nextArea > 0 || task.state === 'preparing';
         task.state = 'queued'; task.nextArea = 0;
@@ -153,7 +175,7 @@ export class TripQueue {
   }
   finish(key: string, state: TripTaskResult, reason?: string, route?: RoadRoute): boolean {
     const task = this.tasks.get(key);
-    if (!task || !RESULTS.has(state) || route !== undefined && !validRoute(route) || state === 'ready' && !route && !task.route) return false;
+    if (!task || task.state === 'direct' || !RESULTS.has(state) || route !== undefined && !validRoute(route) || state === 'ready' && !route && !task.route) return false;
     const text = reasonText(reason);
     const sameRoute = route === undefined || task.route !== undefined && route.distance === task.route.distance &&
       route.coordinates.length === task.route.coordinates.length && route.coordinates.every((coordinate, index) => coordinate[0] === task.route!.coordinates[index][0] && coordinate[1] === task.route!.coordinates[index][1]);
@@ -162,6 +184,38 @@ export class TripQueue {
     task.route = state === 'ready' ? route ? cloneRoute(route) : task.route : undefined;
     this.changed(task); return true;
   }
+  /** Keep previously computed geometry so increasing the limit can restore it without new loading. */
+  setDirect(key: string, reason = 'Straight line: road calculation distance limit.'): boolean {
+    const task = this.tasks.get(key);
+    if (!task) return false;
+    const text = reasonText(reason);
+    if (task.state === 'direct' && task.reason === text) return true;
+    if (task.state !== 'direct') {
+      task.distancePreviousState = task.state;
+      task.distancePreviousReason = task.reason;
+    }
+    task.state = 'direct'; task.reason = text; task.restarted = false;
+    this.changed(task); return true;
+  }
+
+  /** Re-enable a formerly excluded connection; uncalculated empty plans are rebuilt lazily. */
+  restoreDirect(key: string, areas?: readonly TripArea[]): boolean {
+    const task = this.tasks.get(key);
+    if (!task || task.state !== 'direct' || areas !== undefined && !areas.every(validArea)) return false;
+    const previousState = task.distancePreviousState, previousReason = task.distancePreviousReason;
+    if (task.route) { task.state = 'ready'; task.reason = previousReason; task.restarted = false; }
+    else if (previousState === 'no-path' || previousState === 'unavailable' || previousState === 'paused') {
+      // A setting edit must not discard an earlier completed outcome or user pause.
+      task.state = previousState; task.reason = previousReason; task.restarted = false;
+    } else {
+      task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.restarted = true;
+      if (areas) task.areas = areas.map(cloneArea);
+      if (!task.areas.length) task.areas = planTripConnection(task.from, task.to).areas;
+    }
+    delete task.distancePreviousState; delete task.distancePreviousReason;
+    this.changed(task); return true;
+  }
+
   pause(key: string, reason?: string): boolean {
     const task = this.tasks.get(key);
     if (!task || RESULTS.has(task.state)) return false;
@@ -180,19 +234,28 @@ export class TripQueue {
   }
   retry(key: string): boolean {
     const task = this.tasks.get(key);
-    if (!task) return false;
+    if (!task || task.state === 'direct') return false;
     if (task.state === 'queued' && task.nextArea === 0 && !task.reason) return true;
-    task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.route = undefined; task.restarted = true; this.changed(task); return true;
+    task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.route = undefined; task.restarted = true;
+    delete task.distancePreviousState; delete task.distancePreviousReason;
+    this.changed(task); return true;
   }
   snapshot(keys?: readonly string[]): TripQueueSnapshot {
-    const result: TripQueueSnapshot = { total: 0, processed: 0, ready: 0, noPath: 0, unavailable: 0, paused: 0, queued: 0, preparing: 0, percentComplete: 100, percentRemaining: 0, areasProcessed: 0, areasTotal: 0 };
+    const result: TripQueueSnapshot = { total: 0, processed: 0, ready: 0, noPath: 0, unavailable: 0, paused: 0, queued: 0, preparing: 0, percentComplete: 100, percentRemaining: 0, areasProcessed: 0, areasTotal: 0, direct: 0, eligible: 0 };
     for (const task of this.selected(keys)) {
-      result.total++; result.areasTotal += task.areas.length; result.areasProcessed += task.nextArea;
+      result.total++;
+      if (task.state === 'direct') { result.direct = (result.direct ?? 0) + 1; continue; }
+      result.eligible = (result.eligible ?? 0) + 1;
+      result.areasTotal += task.areas.length; result.areasProcessed += task.nextArea;
       if (RESULTS.has(task.state)) result.processed++;
       if (task.state === 'no-path') result.noPath++;
       else result[task.state]++;
     }
-    if (result.total) { result.percentComplete = Math.round(result.processed / result.total * 1000) / 10; result.percentRemaining = Math.round((100 - result.percentComplete) * 10) / 10; }
+    if (result.eligible) {
+      const rounded = Math.round(result.processed / result.eligible * 1000) / 10;
+      result.percentComplete = result.processed < result.eligible ? Math.min(99.9, rounded) : 100;
+      result.percentRemaining = Math.round((100 - result.percentComplete) * 10) / 10;
+    }
     return result;
   }
   serialize(): TripQueueData { return { version: 1, tasks: [...this.tasks.values()].map(cloneTask) }; }
