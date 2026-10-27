@@ -21,7 +21,7 @@ layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.6.2 is a testing prerelease, not an Obsidian directory submission.
+Version 0.6.3 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -31,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.6.2.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.6.3.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -48,13 +48,13 @@ The installation ZIP is `dist/maps-directions-0.6.2.zip`. You can also copy
 8. In local mode, saved paths appear immediately and missing paths prepare in
    the background. **Automatically prepare roads** is on by default. Progress
    and **Pause/Resume** controls show the saved queue state; the visible map
-   stays in place. **Road routes: N/eligible** counts found paths, while preparation
+   stays in place. **Road routes: N/total** counts found paths, while preparation
    progress separately shows processed eligible connections and the percentage
    remaining. Distance-excluded connections are counted separately.
    The **Routes** legend identifies each group and its line color.
    The global **Maximum road-routing distance (km)** defaults to 30 km; longer
    connections stay straight and do not load roads for calculation.
-   **Maximum pin-to-road access (m)** defaults to 250 m. Access from a pin to its
+   **Connect pins to roads within (m)** defaults to 250 m. Access from a pin to its
    chosen road is shown separately as an unverified dashed connector.
 
 Connections are disabled by default for existing views. **Straight line** remains
@@ -158,14 +158,14 @@ color of its line, in all three color modes. A blank group is labeled
 **Ungrouped**. The legend scrolls when there are many groups and disappears when
 there are no connections or no grouping property.
 
-In **Follow roads (local)** mode, **Road routes: N/eligible** counts found paths
+In **Follow roads (local)** mode, **Road routes: N/total** counts found paths
 between adjacent stops, rather than route groups. One Day 1 group with five stops
 has four connections. Short access lines between pins and their road paths do
 not add to that count.
 
 Preparation progress is separate: it shows processed **eligible** connections,
 the remaining eligible count and the percentage remaining. Connections excluded
-by the distance preference are displayed as **Skipped by distance** and are not
+by the distance preference are displayed as **skipped (distance limit)** and are not
 included in either the numerator or denominator of road-processing progress.
 
 The eligible total is all connections minus distance-excluded connections.
@@ -196,7 +196,9 @@ budgets. Working-data limits instead switch automatically to smaller road
 sections within the selected mode. Existing known resource-limit pauses from
 older versions are upgraded to that strategy; user pauses and unrecognized
 failures stay paused. Other queued connections can still be processed.
-Expand the on-map explanation for detailed state and resource scope.
+Open **Details** for loader progress, reasons, result counts, CPU/RAM and saved-data size.
+These technical readings are collapsed by default; the map panel keeps only
+route counts, remaining progress, a short status and **Pause/Resume** controls.
 
 ## Saved preparation queue
 
@@ -212,6 +214,11 @@ connection at a time in small chunks, saves outcomes and progresses to the next
 connection. When a whole-connection search reaches its working-data or worker
 budget, it automatically tries smaller overlapping sections. It saves verified
 section paths and continues without requiring **Resume** for that budget limit.
+If straight corridors fail, a bounded overview search looks for a walking detour
+guide. Detailed windows then follow its bends and backtracking rather than the
+straight line between stops. The guide and verified prefixes survive reopening;
+the coarse guide itself is never displayed as a completed route. Known section
+failures from 0.6.2 automatically get one guided attempt when preparation is enabled.
 Remaining queued connections are not discarded when a chunk ends. Shorter queued
 connections get priority. Because this local walking graph is undirected, an
 existing reverse path can be reused from the same source when its pin access
@@ -259,7 +266,7 @@ preserves the distance and pin-access settings.
 This is an explicit per-connection preference, not a hidden cap on the number of
 connections in the trip.
 
-**Maximum pin-to-road access (m)** defaults to **250** and accepts **0–1000 m**.
+**Connect pins to roads within (m)** defaults to **250** and accepts **0–1000 m**.
 It exposes the previous fixed 100 m allowance for matching original pins to
 nearby allowed roads. Set **0** to require pins to be on the road geometry. The
 pin retains its original coordinates; any access to the chosen road is displayed
@@ -333,13 +340,25 @@ tile lines have no explicit vertex at the crossing. Bridge, tunnel and different
 level crossings remain separated unless a valid road endpoint transition exists.
 Clipping a window cannot manufacture such a transition from an artificial endpoint.
 
-The fallback makes up to three attempts with progressively wider corridors and
-shorter forward steps. It does not retry the same whole-connection network
-indefinitely. If those attempts cannot assemble a connected path, the result is
-**Data unavailable**, with an explanation, rather than a false claim that no
-walking path exists. The finite corridor and candidate search cannot guarantee
-every route or the globally shortest path, particularly around water, mountains,
-large detours or incomplete map topology.
+The fallback first makes up to three attempts with progressively wider straight
+corridors. If they fail, it tries two clipped overview captures within Eco's
+working-data limits to find an allowed walking detour guide. The overview covers
+the endpoint bounds plus a 2 km margin. A guide may use up to 1 km endpoint
+projection only to orient the search; it never changes the configured allowance
+for the final path. Detailed windows follow the guide by travelled distance and
+use the local direction at each seam, including sideways or backward detours.
+Up to three detailed passes retain fixed zoom levels 15, 15 and 14, with small
+windows and the selected pauses and working-data budgets. Only complete verified
+detailed sections become a saved route; guide geometry is checkpoint metadata.
+
+These searches finish rather than retrying the same network indefinitely. If
+they cannot assemble a connected path, the result is **Data unavailable**, with
+an explanation, rather than a false claim that no walking path exists. Existing
+0.6.2 section failures receive one automatic guided attempt; current guided
+failures and explicit user pauses do not enter an automatic retry loop. The
+finite search and candidate choices cannot guarantee every route or the globally
+shortest path, especially around transport crossings, large detours or incomplete
+map topology.
 
 Smaller working networks bound retained road data; they do not guarantee lower
 instantaneous CPU use. Repeated tile loading, graph construction and saved-prefix
@@ -353,7 +372,7 @@ the processed connections. This is not an on-disk road tile database, and the
 background's own availability offline is still governed by Maps and its cache.
 
 If the nearest road belongs to an isolated fragment, the search can try another
-allowed road within **Maximum pin-to-road access (m)**, which defaults to 250 m.
+allowed road within **Connect pins to roads within (m)**, which defaults to 250 m.
 Markers keep their original coordinates, and unverified dashed access lines
 connect them to the chosen road path. Increasing this allowance can choose the
 wrong road or side and does not verify that the access walk is possible. Missing road geometry,
@@ -369,10 +388,18 @@ Run **Maps Directions: Open local roads demo** for public example stops around
 Tokyo Station. It creates `Bases/Maps Directions Local Demo` without overwriting
 existing files. **Maps Directions: Check local routing** reports current status.
 
+## Overlapping road routes
+
+When multiple connections follow the same road segment, their strokes are shown
+as parallel lanes so each route color remains visible. Direction arrows follow
+the matching lane. This is a visual offset in screen pixels; saved paths and
+original Maps pins keep their coordinates. Direct fallback and pin-access lines
+keep their existing appearance.
+
 ## Resource measurements
 
-The on-map monitor reports preparation progress and available CPU/private-memory
-measurements, plus separately scoped storage information. CPU and memory readings
+The map panel keeps connection progress visible. Open its collapsed **Details**
+for CPU/private-memory readings, saved-data size and technical preparation progress. CPU and memory readings
 refer to the **Obsidian window process**, including its other plugins and contents. They are not isolated addon usage, and
 exclude the GPU process and other application processes.
 
@@ -412,20 +439,10 @@ providers. Chromium's shared HTTP cache may retain responses according to their
 cache policy. This is separate from the addon's `data.json` and the temporary
 in-memory tile cache.
 
-On supported desktop installations, a separate **Shared HTTP cache** counter
-uses Electron's current-session cache-size API. It shows the reported cache bytes
-and a signed change since the first successful measurement in the current plugin
-session, refreshed periodically. It includes all HTTP resources in that shared
-Obsidian browser session, including requests unrelated to Maps or this addon.
-It is not a Maps-only counter, and a change cannot be attributed to route
-preparation alone. When the API is unavailable, the value remains unknown rather
-than zero. Reading this counter does not clear shared cached responses.
-
-The saved-data file statistic and Electron's cache-size counter are logical byte
-measurements, not guarantees about physically allocated disk blocks. They do not
-include cloud sync history, every Obsidian/plugin file or other browser sessions.
-The two counters remain separate rather than being presented as the plugin's
-complete disk footprint.
+**Saved data** appears inside the map panel's collapsed **Details** and in plugin
+settings. It measures only this addon's file, not the browser cache or total
+application storage. File bytes do not represent physically allocated disk blocks
+or cloud sync history.
 
 ## Ordering and filters
 

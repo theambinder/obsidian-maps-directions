@@ -181,6 +181,28 @@ test('a user-paused connection cannot be resurrected by a late worker result', a
   assert.equal(subject.found.length, 0);
 });
 
+test('hiding during guide search requeues its checkpoint rather than recording unavailable data', async () => {
+  const client = new DeferredClient(), subject = setup([connection('a', [])], { client });
+  subject.ledger.start('a');
+  subject.ledger.setSplit('a', { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [], guided: true });
+  subject.ledger.requeue('a');
+  let visible = true;
+  subject.configuration.visible = () => visible;
+  const operation = processTripQueue(subject.configuration);
+  await flush();
+  assert.equal(client.calls.length, 1);
+  visible = false;
+  client.finish(0, road);
+  await assert.rejects(operation, /no longer visible/);
+  assert.equal(subject.ledger.status('a')?.state, 'queued');
+  assert.equal(subject.ledger.get('a')?.split?.guided, true);
+  assert.equal(subject.ledger.get('a')?.route, undefined);
+  assert.equal(subject.ledger.snapshot().processed, 0);
+  assert.equal(subject.ledger.snapshot().unavailable, 0);
+  assert.equal(subject.background.calls.length, 1);
+  assert.equal(subject.found.length, 0);
+});
+
 test('dense areas subdivide in place and continue with smaller views rather than becoming no-path', async () => {
   const runner = new BackgroundRunner((_call, _index, target) => ({ data: snapshot(target.zoom, target.zoom === 14 ? 'limited' : 'ready') }));
   const subject = setup([connection('a')], { background: runner, client: new TestClient(() => ({ route: road })) });
@@ -271,7 +293,7 @@ test('truncated graphs and evicted roads try finite section searches instead of 
   });
   await processTripQueue(eviction.configuration);
   assert.equal(eviction.ledger.get('memory')?.state, 'unavailable');
-  assert.match(eviction.ledger.get('memory')?.reason ?? '', /Automatic section searches/);
+  assert.match(eviction.ledger.get('memory')?.reason ?? '', /Automatic guided search/);
   assert.equal(eviction.ledger.snapshot().paused, 0);
   assert.equal(eviction.ledger.snapshot().noPath, 0);
 });

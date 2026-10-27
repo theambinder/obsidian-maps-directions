@@ -1,7 +1,6 @@
 import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
 import { readWorkloadSettings, workloadProfile, type WorkloadMode, type WorkloadSettings } from './workload-settings';
 import { formatStorageBytes, formatStorageDelta, type StorageSnapshot } from './storage-usage';
-import type { SharedHttpCacheSnapshot } from './shared-http-cache';
 
 /** Workload preferences belong to the addon, rather than individual Bases views. */
 export class MapsDirectionsSettingTab extends PluginSettingTab {
@@ -9,7 +8,6 @@ export class MapsDirectionsSettingTab extends PluginSettingTab {
     private readonly getSettings: () => WorkloadSettings,
     private readonly onChange: (settings: WorkloadSettings) => void | Promise<void>,
     private readonly getStorage?: () => StorageSnapshot,
-    private readonly getSharedCache?: () => SharedHttpCacheSnapshot,
   ) { super(app, plugin); }
 
   private async commit(settings: WorkloadSettings, redraw = false): Promise<void> {
@@ -37,8 +35,8 @@ export class MapsDirectionsSettingTab extends PluginSettingTab {
         });
       });
     new Setting(container)
-      .setName('Maximum pin-to-road access (m)')
-      .setDesc('Default 250 m; range 0–1000 m. Pin access to a nearby allowed road is an unverified dashed connector. Larger values can select the wrong road or side and require an unverified walk. Internal road sections never jump gaps. 0 requires the pin to be on a road. Changing this value retries unresolved searches with automatic preparation enabled; saved complete paths and existing pauses are kept.')
+      .setName('Connect pins to roads within (m)')
+      .setDesc('If a pin is off the road, allow a dashed connection up to this distance (default 250 m; range 0–1000 m). That part is not checked for walkability: a larger value may cross a barrier or select the wrong road. 0 requires the pin to be on a road. Changing this retries unresolved routes when automatic preparation is enabled; saved routes and pauses are kept.')
       .addText(text => {
         text.inputEl.type = 'number';
         text.inputEl.min = '0'; text.inputEl.max = '1000'; text.inputEl.step = '1';
@@ -83,14 +81,7 @@ export class MapsDirectionsSettingTab extends PluginSettingTab {
     const exactBytes = size === null ? '' : ` (${size.toLocaleString('en-US')} bytes)`;
     new Setting(container)
       .setName('Saved data file')
-      .setDesc(`${formatStorageBytes(size)}${exactBytes} · ${formatStorageDelta(storage?.sessionDeltaBytes)} since plugin start. Addon data.json only. Includes saved paths, queue and settings; the shared HTTP cache is not included here and is shown separately when available.`)
+      .setDesc(`${formatStorageBytes(size)}${exactBytes} · ${formatStorageDelta(storage?.sessionDeltaBytes)} since plugin start. Saved routes, progress and plugin settings in data.json.`)
       .addExtraButton(button => button.setIcon('refresh-cw').setTooltip('Refresh displayed storage size').onClick(() => this.display()));
-    const shared = this.getSharedCache?.();
-    const cacheSize = shared?.available ? shared.bytes : null;
-    const exactCacheBytes = cacheSize === null ? '' : ` (${cacheSize.toLocaleString('en-US')} bytes)`;
-    new Setting(container)
-      .setName('Shared Obsidian HTTP cache')
-      .setDesc(`${formatStorageBytes(cacheSize)}${exactCacheBytes} · ${formatStorageDelta(shared?.sessionDeltaBytes)} since plugin start. Includes Maps and other plugins in this Obsidian session; changes cannot be attributed to this addon alone. Excludes the addon data.json above. Read every 30 seconds when available on desktop; — means unavailable.`)
-      .addExtraButton(button => button.setIcon('refresh-cw').setTooltip('Refresh displayed cache reading').onClick(() => this.display()));
   }
 }

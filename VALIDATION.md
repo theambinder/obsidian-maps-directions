@@ -1,3 +1,40 @@
+# Validation — Maps Directions 0.6.3
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.
+
+- All 397 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- A synthetic walking detour with substantial sideways and backward travel is
+  found through a bounded overview guide and verified by real detailed graphs.
+  A coarse guide without connected detailed roads never becomes a final route.
+- Guide fetching retains Eco's feature/coordinate limits. Detailed passes keep
+  fixed street zoom levels, local tangent gates, strict anchors and per-window
+  graph release. Guide-only projection cannot relax final pin access or seams.
+- Guides, selected pass, cursor and verified frontier are validated and deep-copied
+  through persistence. Reload resumes the detailed prefix without fetching a new
+  guide; terminal results clear working checkpoints.
+- Only the exact known old section failure upgrades automatically, once, while
+  automatic preparation is enabled. New terminal failures, saved paths, distance
+  exclusions and explicit user pauses retain their behavior.
+- Hidden views, user pause, source-generation changes, replaced endpoints and
+  changed distance policy reject late results. A hidden in-progress guide task
+  is requeued instead of being incorrectly recorded as unavailable.
+- Shared road runs get parallel screen-pixel lanes for two or more routes,
+  opposite directions and repeated traversals. Tests cover curves, partial
+  overlaps with different subdivisions, nearby streets, crossings and world seams.
+- Sparse hierarchical indexing avoids quadratic work for long vertical/horizontal
+  routes even with unrelated distant geometry. Unchanged geometry reuses its
+  layout. Saved route coordinates, lengths and official Maps markers are intact.
+- Native Maps displays shifted lines with matching arrows and the compact panel.
+  A previously unresolved detour completes automatically in Eco; unsupported
+  walking crossings finish honestly without a Resume or repeated-failure loop.
+- Progress excludes distance-skipped connections. Loader counts, reasons, CPU/RAM
+  and own saved-data size are inside closed Details; unchanged visible progress
+  is not rewritten on every resource tick. Shared HTTP-cache polling is removed.
+- Personal trip geometry, native resource samples, notes, cache files and
+  machine-specific paths are excluded from source and release artifacts.
+
+---
+
 # Validation — Maps Directions 0.6.2
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.

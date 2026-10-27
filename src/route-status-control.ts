@@ -2,7 +2,6 @@ import type { FeatureCollection } from './contracts';
 import type { TripQueueSnapshot } from './trip-queue';
 import type { ResourceSnapshot } from './resource-sampler';
 import { formatStorageBytes, formatStorageDelta, type StorageSnapshot } from './storage-usage';
-import type { SharedHttpCacheSnapshot } from './shared-http-cache';
 
 export interface RoadRouteProgress { routed: number; total: number; missing: number }
 export interface RoadPreparationProgress {
@@ -31,6 +30,7 @@ const RESOURCE_HELP = 'Obsidian window process, includes other plugins; GPU excl
 const measured = (value: number | null | undefined, decimals = 0): string => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(Number(value.toFixed(decimals))) : '—';
 const queueNumber = (value: number): number => Number.isFinite(value) ? Math.max(0, value) : 0;
 const PREPARE_HELP = 'Load detailed map areas in the background and save found walking paths.';
+const writeText = (element: HTMLElement, text: string): void => { if (element.textContent !== text) element.textContent = text; };
 
 /** A lightweight explanation and entry point for local road routing. */
 export class RouteStatusControl {
@@ -43,9 +43,10 @@ export class RouteStatusControl {
   private preparation: HTMLElement | null = null;
   private queueSummary: HTMLElement | null = null;
   private queueCounts: HTMLElement | null = null;
+  private skipped: HTMLElement | null = null;
+  private workProgress: HTMLElement | null = null;
   private resources: HTMLElement | null = null;
   private storage: HTMLElement | null = null;
-  private sharedCache: HTMLElement | null = null;
   private signature = '';
   private action: (() => void) | null = null;
 
@@ -62,7 +63,6 @@ export class RouteStatusControl {
     resources?: ResourceSnapshot,
     workloadLabel?: string,
     storage?: StorageSnapshot,
-    sharedCache?: SharedHttpCacheSnapshot,
   ): void {
     const progress = getRoadRouteProgress(data);
     if (!host || !local || progress.total === 0) {
@@ -81,12 +81,20 @@ export class RouteStatusControl {
     this.action = running ? onCancel ?? null : resumable ? onPrepare : automatic ? null : onPrepare;
     const manualMissing = queueProgress ? remaining : progress.missing;
     const showButton = running || resumable && onPrepare !== null || !automatic && manualMissing > 0 && onPrepare !== null;
-    const preparationText = running
+    const workText = running
       ? preparation!.unit === 'sections' ? preparation!.message ?? `Preparing smaller road sections: ${preparation!.completed}/${preparation!.total}` : `Preparing roads: ${preparation!.completed}/${preparation!.total} areas`
       : preparation?.message ?? (queueProgress?.paused ? `${queueProgress.paused} connections paused. Open details for the reason.` : '');
+    const unresolved = queueProgress ? queueNumber(queueProgress.noPath) + queueNumber(queueProgress.unavailable) : progress.missing;
+    const preparationText = running ? 'Preparing roads…'
+      : resumable ? `Paused · ${queueNumber(queueProgress!.paused)} connection${queueProgress!.paused === 1 ? '' : 's'}`
+      : queueProgress && remaining === 0 ? eligible === 0 ? 'No road calculation needed' : unresolved ? `Finished · ${unresolved} unresolved` : 'Finished'
+      : queueProgress && automatic && remaining > 0 ? 'Waiting to prepare…'
+      : preparation ? preparation.total > 0 && preparation.completed >= preparation.total ? unresolved ? `Finished · ${unresolved} unresolved` : 'Finished' : 'Preparation stopped' : '';
     const queueText = queueProgress
-      ? `Processed ${queueNumber(queueProgress.processed)}/${eligible} eligible connections (${measured(Math.min(100, queueNumber(queueProgress.percentComplete)), 1)}%) · Remaining: ${remaining} (${measured(Math.min(100, queueNumber(queueProgress.percentRemaining)), 1)}%) · Skipped by distance: ${queueNumber(queueProgress.direct ?? 0)}`
+      ? `${queueNumber(queueProgress.processed)}/${eligible} processed · ${remaining} left (${measured(Math.min(100, queueNumber(queueProgress.percentRemaining)), 1)}%)`
       : '';
+    const skipped = queueNumber(queueProgress?.direct ?? 0);
+    const skippedText = skipped ? `${skipped} skipped (distance limit)` : '';
     const queueCounts = queueProgress
       ? `Eligible: ${eligible} · Queued: ${queueNumber(queueProgress.queued)} · Preparing: ${queueNumber(queueProgress.preparing)} · Ready: ${queueNumber(queueProgress.ready)} · Skipped by distance: ${queueNumber(queueProgress.direct ?? 0)} · No path: ${queueNumber(queueProgress.noPath)} · Data unavailable: ${queueNumber(queueProgress.unavailable)} · Paused: ${queueNumber(queueProgress.paused)}`
       : '';
@@ -95,36 +103,38 @@ export class RouteStatusControl {
       ? `${workloadLabel ? `${workloadLabel} · ` : ''}Window CPU ${measured(resources?.currentCpuPercent, 1)}${measured(resources?.currentCpuPercent, 1) === '—' ? '' : '%'} · Window RAM ${measured(resources?.currentMemoryMb)}${measured(resources?.currentMemoryMb) === '—' ? '' : ' MiB'}`
       : '';
     const storageText = storage ? `Saved data ${formatStorageBytes(storage.dataBytes)} · ${formatStorageDelta(storage.sessionDeltaBytes)} this session` : '';
-    const sharedCacheText = sharedCache ? `Shared HTTP cache ${formatStorageBytes(sharedCache.bytes)} · ${formatStorageDelta(sharedCache.sessionDeltaBytes)} this session` : '';
-    const signature = JSON.stringify([progress, eligible, ready, status, showButton, running, resumable, !!this.action, preparationText, automatic, queueText, queueCounts, resourceText, storageText, sharedCacheText]);
+    const signature = JSON.stringify([progress, eligible, ready, status, showButton, running, resumable, !!this.action, preparationText, workText, automatic, queueText, skippedText, queueCounts, resourceText, storageText]);
     if (signature === this.signature) return;
     this.signature = signature;
-    this.count!.textContent = `Road routes: ${ready}/${eligible}${queueProgress ? ' eligible' : ''}`;
+    writeText(this.count!, `Road routes: ${ready}/${eligible}`);
     this.button!.hidden = !showButton;
     // Themes can override the browser's hidden rule for native buttons.
     this.button!.style.display = showButton ? '' : 'none';
     this.button!.disabled = !showButton || this.action === null;
-    this.button!.textContent = running ? queueProgress ? 'Pause' : 'Cancel' : resumable ? 'Resume' : 'Prepare road routes';
+    writeText(this.button!, running ? queueProgress ? 'Pause' : 'Cancel' : resumable ? 'Resume' : 'Prepare road routes');
     this.button!.title = running ? queueProgress ? 'Pause preparation. Completed connections and queue progress are saved.' : 'Cancel road preparation. Paths already found are kept.' : resumable ? 'Continue the saved queue with the current workload settings.' : PREPARE_HELP;
-    this.preparation!.textContent = preparationText;
+    writeText(this.preparation!, preparationText);
     this.preparation!.hidden = preparationText.length === 0;
-    this.help!.textContent = `${automatic ? AUTOMATIC_ROAD_HELP : ROAD_HELP}${queueProgress ? ` ${QUEUE_HELP}` : ''}`;
-    this.queueSummary!.textContent = queueText;
+    writeText(this.help!, `${automatic ? AUTOMATIC_ROAD_HELP : ROAD_HELP}${queueProgress ? ` ${QUEUE_HELP}` : ''}`);
+    writeText(this.queueSummary!, queueText);
     this.queueSummary!.hidden = !queueProgress;
     this.queueSummary!.style.display = queueProgress ? '' : 'none';
-    this.queueCounts!.textContent = queueCounts;
+    writeText(this.skipped!, skippedText);
+    this.skipped!.hidden = !skipped;
+    this.skipped!.style.display = skipped ? '' : 'none';
+    writeText(this.workProgress!, workText);
+    this.workProgress!.hidden = !workText;
+    this.workProgress!.style.display = workText ? '' : 'none';
+    writeText(this.queueCounts!, queueCounts);
     this.queueCounts!.hidden = !queueProgress;
     this.queueCounts!.style.display = queueProgress ? '' : 'none';
-    this.resources!.textContent = resourceText;
+    writeText(this.resources!, resourceText);
     this.resources!.hidden = !showResources;
     this.resources!.style.display = showResources ? '' : 'none';
-    this.storage!.textContent = storageText;
+    writeText(this.storage!, storageText);
     this.storage!.hidden = !storage;
     this.storage!.style.display = storage ? '' : 'none';
-    this.sharedCache!.textContent = sharedCacheText;
-    this.sharedCache!.hidden = !sharedCache;
-    this.sharedCache!.style.display = sharedCache ? '' : 'none';
-    this.status!.textContent = status;
+    writeText(this.status!, status);
     this.status!.hidden = status.length === 0;
   }
 
@@ -139,9 +149,10 @@ export class RouteStatusControl {
     this.preparation = null;
     this.queueSummary = null;
     this.queueCounts = null;
+    this.skipped = null;
+    this.workProgress = null;
     this.resources = null;
     this.storage = null;
-    this.sharedCache = null;
     this.signature = '';
     this.action = null;
   }
@@ -172,19 +183,18 @@ export class RouteStatusControl {
     queueSummary.setAttribute('role', 'status');
     queueSummary.title = 'Progress covers connections within the distance limit only. Skipped long connections are excluded. Processed tasks include unavailable data and paths not found; paused tasks remain unfinished.';
     Object.assign(queueSummary.style, { flexBasis: '100%', fontSize: '12px', overflowWrap: 'anywhere' });
-    const resources = doc.createElement('span');
+    const skipped = doc.createElement('span');
+    skipped.className = 'obsidian-maps-directions-skipped-status';
+    Object.assign(skipped.style, { flexBasis: '100%', fontSize: '11px', color: 'var(--text-muted, #666)' });
+    const resources = doc.createElement('p');
     resources.className = 'obsidian-maps-directions-resource-status';
     resources.title = RESOURCE_HELP;
-    Object.assign(resources.style, { flexBasis: '100%', fontSize: '11px', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
-    const storage = doc.createElement('span');
+    Object.assign(resources.style, { margin: '7px 0 0', fontSize: '11px', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
+    const storage = doc.createElement('p');
     storage.className = 'obsidian-maps-directions-storage-status';
-    storage.title = 'Logical size of the addon data.json file only. Shared browser/map HTTP cache is excluded here and shown separately when available. Change is since this plugin session started.';
-    Object.assign(storage.style, { flexBasis: '100%', fontSize: '11px', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
-    const sharedCache = doc.createElement('span');
-    sharedCache.className = 'obsidian-maps-directions-shared-cache-status';
-    sharedCache.title = 'Shared Obsidian HTTP cache reported by Electron for the current browser session. Includes Maps and unrelated plugins/resources; cannot be attributed to Maps Directions alone. Change is since this plugin session started. Updated about every 30 seconds when available.';
-    Object.assign(sharedCache.style, { flexBasis: '100%', fontSize: '11px', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
-    header.append(count, button, queueSummary, resources, storage, sharedCache);
+    storage.title = 'Size of this addon’s saved routes, progress and settings in data.json. Change is since this plugin session started.';
+    Object.assign(storage.style, { margin: '7px 0 0', fontSize: '11px', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
+    header.append(count, button, queueSummary, skipped);
     const preparation = doc.createElement('div');
     preparation.className = 'obsidian-maps-directions-preparation-progress';
     preparation.setAttribute('role', 'status');
@@ -192,7 +202,7 @@ export class RouteStatusControl {
     const details = doc.createElement('details');
     Object.assign(details.style, { marginTop: '5px', maxHeight: 'min(240px, 50vh)', overflowY: 'auto', overscrollBehavior: 'contain' });
     const summary = doc.createElement('summary');
-    summary.textContent = 'Why dashed lines?';
+    summary.textContent = 'Details';
     Object.assign(summary.style, { cursor: 'pointer', color: 'var(--text-muted, #666)' });
     const help = doc.createElement('p');
     help.textContent = ROAD_HELP;
@@ -203,7 +213,10 @@ export class RouteStatusControl {
     const queueCounts = doc.createElement('p');
     queueCounts.className = 'obsidian-maps-directions-queue-counts';
     Object.assign(queueCounts.style, { margin: '7px 0 0', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
-    details.append(summary, help, diagnostic, queueCounts);
+    const workProgress = doc.createElement('p');
+    workProgress.className = 'obsidian-maps-directions-work-detail';
+    Object.assign(workProgress.style, { margin: '7px 0 0', overflowWrap: 'anywhere' });
+    details.append(summary, help, diagnostic, queueCounts, workProgress, resources, storage);
     root.append(header, preparation, details);
     // Native controls and help scrolling must not drag or zoom the map.
     for (const event of ['mousedown', 'pointerdown', 'touchstart', 'wheel', 'click', 'dblclick', 'keydown']) {
@@ -219,8 +232,9 @@ export class RouteStatusControl {
     this.preparation = preparation;
     this.queueSummary = queueSummary;
     this.queueCounts = queueCounts;
+    this.skipped = skipped;
+    this.workProgress = workProgress;
     this.resources = resources;
     this.storage = storage;
-    this.sharedCache = sharedCache;
   }
 }

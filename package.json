@@ -1,6 +1,6 @@
 {
   "name": "obsidian-maps-directions",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "private": true,
   "description": "Directional connections for the official Obsidian Maps layout.",
   "license": "MIT",

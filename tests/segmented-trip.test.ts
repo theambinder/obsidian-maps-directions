@@ -164,6 +164,61 @@ test('a real detour outside the first corridor is found by the next wider automa
   assert.equal(subject.client.graph, null);
 });
 
+const largeDetour = (): RoadFeature => road([point(0), point(-400), point(-400, 1800), point(1800, 1800), point(1800), point(1400)]);
+
+test('a bounded overview guide automatically resolves a backward detour beyond all straight corridors using only verified detail paths', async () => {
+  const subject = setup({ roads: [largeDetour()] });
+  await processSplitTrip(subject.options, 'trip', () => true);
+  const task = subject.ledger.get('trip')!;
+  assert.equal(task.state, 'ready');
+  assert.match(task.reason ?? '', /verified guided local road sections/);
+  assert.equal(subject.found.length, 1);
+  assert.ok(Math.abs(subject.found[0].distance - 6600) < .1);
+  assert.ok(subject.found[0].coordinates.some(coordinate => roadDistance(coordinate, point(-400, 1800)) < .01));
+  assert.ok(subject.found[0].coordinates.some(coordinate => roadDistance(coordinate, point(1800, 1800)) < .01));
+  assert.ok(subject.progress.some(progress => progress.message.includes('guided road sections')));
+  const guidedStart = subject.progress.find(progress => progress.message.includes('guided road sections'));
+  assert.ok(guidedStart);
+  assert.ok(subject.runner.calls.every(call => call.options.viewportWidth === 768 && call.options.viewportHeight === 512));
+  assert.ok(subject.runner.calls.every(call => call.options.roadLimits!.maxFeatures! <= 6000 && call.options.roadLimits!.maxPositions! <= 50000));
+  assert.equal(subject.runner.peakActive, 1);
+  assert.equal(subject.client.graph, null);
+  assert.equal(task.split, undefined);
+});
+
+test('an unverified coarse guide can never become a finished road path', async () => {
+  const subject = setup({ roads: [largeDetour()] });
+  subject.ledger.setSplit('trip', { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [], guided: true,
+    guide: { coordinates: [point(0), point(1400)], distance: 1400 } });
+  await processSplitTrip(subject.options, 'trip', () => true);
+  assert.equal(subject.ledger.status('trip')?.state, 'unavailable');
+  assert.match(subject.ledger.status('trip')?.reason ?? '', /guided search could not verify/);
+  assert.equal(subject.ledger.get('trip')?.route, undefined);
+  assert.equal(subject.found.length, 0);
+});
+
+test('saved guided prefixes resume from their detailed frontier without fetching the overview guide again', async () => {
+  const subject = setup({ roads: [largeDetour()] });
+  const report = subject.options.onProgress!;
+  subject.options.onProgress = progress => {
+    report(progress);
+    if (subject.ledger.get('trip')?.split?.guided && progress.message.startsWith('Smaller sections saved: 2/')) subject.controller.abort();
+  };
+  await processSplitTrip(subject.options, 'trip', () => true);
+  const saved = subject.ledger.get('trip')!.split!;
+  assert.equal(saved.guided, true);
+  assert.ok(saved.guide);
+  assert.equal(saved.nextPart, 2);
+  assert.equal(subject.found.length, 0);
+  const fresh = setup({ roads: [largeDetour()], ledger: new TripQueue(JSON.parse(JSON.stringify(subject.ledger.serialize()))) });
+  await processSplitTrip(fresh.options, 'trip', () => true);
+  assert.equal(fresh.ledger.status('trip')?.state, 'ready');
+  assert.ok(fresh.runner.calls.every(call => call.target.zoom >= 14));
+  const first = fresh.client.calls.flatMap(call => call.legs).find(leg => leg.fromAnchor)!;
+  assert.deepEqual(first.fromAnchor, saved.frontier[0].anchor);
+  assert.ok(Math.abs(fresh.found[0].distance - 6600) < .1);
+});
+
 test('keeping alternative reachable portals avoids getting stuck on the nearest dead-end road', async () => {
   const subject = setup({ roads: [road([point(0), point(900)]), road([point(0), point(0, 100), point(1400, 100), point(1400)])] });
   let largestFrontier = 0;
@@ -263,7 +318,7 @@ test('missing, limited, timed-out and graph-truncated corridors finish as unavai
     await processSplitTrip(subject.options, 'trip', () => true);
     assert.equal(subject.ledger.get('trip')?.state, 'unavailable', failure);
     assert.equal(subject.ledger.snapshot().paused, 0);
-    assert.equal(subject.runner.calls.length, 6, 'Two loading attempts for each of three corridor passes.');
+    assert.equal(subject.runner.calls.length, 8, 'Three two-attempt corridor passes and two bounded overview attempts.');
     assert.equal(subject.found.length, 0);
     assert.equal(subject.client.graph, null);
   }

@@ -1,5 +1,6 @@
 import type { FeatureCollection, MapLike, MapsViewLike, OverlayLike } from './contracts';
 import { buildDirections, normalizeLongitude } from './geometry';
+import { separateRoadLanes } from './route-lanes';
 import { collectLocalRoads, type RoadSnapshot } from './local-roads';
 import { LocalRoutingClient, type RoutingClient } from './local-routing-client';
 import type { RoadRoute, RoutingResult } from './routing-protocol';
@@ -19,7 +20,6 @@ import { processTripQueue } from './trip-processor';
 import { workloadProfile, DEFAULT_WORKLOAD_SETTINGS, type WorkloadProfile } from './workload-settings';
 import type { ResourceSnapshot } from './resource-sampler';
 import type { StorageSnapshot } from './storage-usage';
-import type { SharedHttpCacheSnapshot } from './shared-http-cache';
 
 interface PreparationServices {
   factory?: (map: MapLike) => BackgroundMapFactory | null;
@@ -32,7 +32,6 @@ interface PreparationServices {
   workload?: () => WorkloadProfile;
   resources?: () => ResourceSnapshot;
   storage?: () => StorageSnapshot;
-  sharedCache?: () => SharedHttpCacheSnapshot;
 }
 
 export const RESOURCE_PREFIX = 'obsidian-maps-directions-';
@@ -80,6 +79,8 @@ export class DirectionsOverlay implements OverlayLike {
   private readonly imageId = `${this.id}-chevron`;
   private map: MapLike | null = null;
   private dataSignature: string | null = null;
+  private laneInputSignature: string | null = null;
+  private laneData: FeatureCollection | null = null;
   private styleSignature: string | null = null;
   private readonly arrowImages = new Map<string, string>();
   private readonly normalizeColor = createLineColorResolver();
@@ -172,8 +173,13 @@ export class DirectionsOverlay implements OverlayLike {
       const colored = colorDirections(this.connectionData(map, directData, options.routeMode), this.view.markerManager.markers, { ...options, normalizeColor: this.normalizeColor, palette: this.routePalette });
       const host = map.getContainer?.() ?? null;
       this.legend.update(host, colored, !!options.groupProperty);
-      this.statusControl.update(host, colored, options.routeMode === 'local', this.routingStatus, this.roads?.state !== 'unsupported' && this.preparationFactory(map) ? () => { void this.prepareRoadRoutes(false, false); } : null, this.preparationProgress, () => { this.cancelPreparation(true); this.update(); }, options.autoPrepare, this.preparationServices.tripQueue?.snapshot(this.smartKeys), this.preparationServices.resources?.(), this.currentWorkload().label, this.preparationServices.storage?.(), this.preparationServices.sharedCache?.());
-      const data: FeatureCollection = { type: 'FeatureCollection', features: colored.features.map(feature => ({
+      this.statusControl.update(host, colored, options.routeMode === 'local', this.routingStatus, this.roads?.state !== 'unsupported' && this.preparationFactory(map) ? () => { void this.prepareRoadRoutes(false, false); } : null, this.preparationProgress, () => { this.cancelPreparation(true); this.update(); }, options.autoPrepare, this.preparationServices.tripQueue?.snapshot(this.smartKeys), this.preparationServices.resources?.(), this.currentWorkload().label, this.preparationServices.storage?.());
+      const laneInput = JSON.stringify([colored, options.width, options.arrowSize]);
+      if (laneInput !== this.laneInputSignature || !this.laneData) {
+        this.laneData = separateRoadLanes(colored, options.width, options.arrowSize);
+        this.laneInputSignature = laneInput;
+      }
+      const data: FeatureCollection = { type: 'FeatureCollection', features: this.laneData.features.map(feature => ({
         ...feature, properties: { ...feature.properties, arrowImage: `${this.imageId}-${String(feature.properties.lineColor).slice(1)}` },
       })) };
       const dataSignature = JSON.stringify(data);
@@ -212,7 +218,7 @@ export class DirectionsOverlay implements OverlayLike {
           source: this.sourceId,
           filter: ['all', ['!=', ['get', 'connectionKind'], 'fallback'], ['!=', ['get', 'connectionKind'], 'connector']],
           layout: { 'line-cap': 'round', 'line-join': 'round' },
-          paint: { 'line-color': ['get', 'lineColor'], 'line-width': options.width, 'line-opacity': options.opacity },
+          paint: { 'line-color': ['get', 'lineColor'], 'line-width': options.width, 'line-opacity': options.opacity, 'line-offset': ['get', 'lineOffset'] },
         }, beforeId);
       }
       if (options.routeMode === 'local' && !map.getLayer(this.dashedId)) {
@@ -229,11 +235,12 @@ export class DirectionsOverlay implements OverlayLike {
             id: this.arrowId,
             type: 'symbol',
             source: this.sourceId,
-            filter: ['!=', ['get', 'connectionKind'], 'connector'],
+            filter: ['==', ['get', 'laneArrow'], 1],
             layout: {
               'symbol-placement': 'line-center',
               'icon-image': ['get', 'arrowImage'],
               'icon-size': options.arrowSize,
+              'icon-offset': ['get', 'iconOffset'],
               'icon-keep-upright': false,
               'icon-rotation-alignment': 'map',
               'icon-pitch-alignment': 'map',
@@ -415,7 +422,10 @@ export class DirectionsOverlay implements OverlayLike {
       const route = task?.state === 'ready' ? task.route : this.routeCache.get(routeKey);
       if (route) { this.retainedRoutes.set(routeKey, route); if (task?.state !== 'ready') ledger.finish(key, 'ready', 'Restored saved path.', route); }
     });
-    if (readOptions(this.view.config).autoPrepare) ledger.upgradeBudgetPauses(this.smartKeys);
+    if (readOptions(this.view.config).autoPrepare) {
+      ledger.upgradeBudgetPauses(this.smartKeys);
+      ledger.upgradeGuidedSearchFailures(this.smartKeys);
+    }
     const result = applyRoadRoutes(direct, { id: 0, routes: this.smartRouteKeys.map(key => this.retainedRoutes.get(key) ?? null), stats: { nodes: 0, edges: 0, truncated: false } });
     result.features = result.features.map(feature => feature.properties.connectionKind === 'fallback' && intentionalStraight.has(routeKey(feature)) ? { ...feature, properties: { ...feature.properties, connectionKind: 'direct' } } : feature);
     this.routedData = result;
@@ -483,7 +493,7 @@ export class DirectionsOverlay implements OverlayLike {
       });
       if (!controller.signal.aborted) {
         const progress = ledger.snapshot(this.smartKeys);
-        this.preparationProgress = { running: false, completed: 0, total: 0, message: progress.paused ? `${progress.paused} connections paused. Open Why dashed lines? for the reason; Resume continues them. Resource-limited connections automatically use smaller sections.` : 'Queue processing finished. Results and progress are saved.' };
+        this.preparationProgress = { running: false, completed: 0, total: 0, message: progress.paused ? `${progress.paused} connections paused. Open Details for the reason; Resume continues them. Resource-limited connections automatically use smaller sections.` : 'Queue processing finished. Results and progress are saved.' };
       }
     } catch {
       if (!controller.signal.aborted) this.preparationProgress = { running: false, completed: 0, total: 0, message: 'Queue interrupted. Completed connections are saved.' };
@@ -693,6 +703,8 @@ export class DirectionsOverlay implements OverlayLike {
     const map = this.map;
     this.map = null;
     this.dataSignature = null;
+    this.laneInputSignature = null;
+    this.laneData = null;
     this.styleSignature = null;
     this.sourceContext = null;
     this.smartInput = '';

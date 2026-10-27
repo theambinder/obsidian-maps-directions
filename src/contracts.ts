@@ -23,7 +23,7 @@ export interface FeatureCollection {
   type: 'FeatureCollection';
   features: Array<{
     type: 'Feature';
-    properties: Record<string, string | number>;
+    properties: Record<string, string | number | number[]>;
     geometry: { type: 'LineString'; coordinates: [number, number][] };
   }>;
 }

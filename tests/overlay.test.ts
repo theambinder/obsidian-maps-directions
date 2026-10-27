@@ -452,7 +452,7 @@ function preparationSetup(services: ConstructorParameters<typeof DirectionsOverl
 function preparationControl(host: OverlayTestElement) {
   const root = host.children.find(child => child.className === 'obsidian-maps-directions-route-status');
   assert.ok(root, 'Expected the on-map road preparation control.');
-  return { root, button: root.children[0].children[1], count: root.children[0].children[0], progress: root.children[1] };
+  return { root, button: root.children[0].children[1], count: root.children[0].children[0], progress: root.children[1], work: root.children[2].children[4] };
 }
 
 test('background road preparation requires the explicit map action and never moves the visible camera', async () => {
@@ -470,11 +470,11 @@ test('background road preparation requires the explicit map action and never mov
   assert.ok(background.calls[0].centers.length > 0 && background.calls[0].centers.length <= 64);
   assert.equal(control.button.textContent, 'Cancel');
   background.progress(0, 1);
-  assert.equal(control.progress.textContent, `Preparing roads: 1/${background.calls[0].centers.length} areas`);
+  assert.equal(control.work.textContent, `Preparing roads: 1/${background.calls[0].centers.length} areas`);
   background.finish(0);
   await flushRouting();
   assert.equal(control.button.textContent, 'Prepare road routes');
-  assert.match(control.progress.textContent, /Preparation complete/);
+  assert.match(control.work.textContent, /Preparation complete/);
   assert.deepEqual(cameraMoves, []);
   assert.equal(roads.zoom, 6);
   assert.deepEqual(errors, []);
@@ -499,7 +499,7 @@ test('prepared road snapshots find paths, refresh the live map, and persist the 
   background.finish(0);
   await preparation;
   assert.equal(preparationControl(host).button.hidden, true);
-  assert.match(preparationControl(host).progress.textContent, /1\/1 follow roads/);
+  assert.match(preparationControl(host).work.textContent, /1\/1 follow roads/);
   assert.deepEqual(cameraMoves, []);
   assert.deepEqual(errors, []);
   assertOriginalResources(map);
@@ -514,7 +514,7 @@ test('preparation without any loaded road areas explains unavailable data instea
   await preparation;
   const control = preparationControl(host);
   const diagnostic = control.root.children[2].children[2].textContent;
-  assert.match(control.progress.textContent, /no detailed road|unavailable/i);
+  assert.match(control.work.textContent, /no detailed road|unavailable/i);
   assert.match(diagnostic, /unavailable|no detailed road/i);
   assert.doesNotMatch(diagnostic, /no connected walking path/i);
   assert.equal(control.button.textContent, 'Prepare road routes');
@@ -539,7 +539,7 @@ test('Cancel aborts asynchronous preparation and late worker results cannot save
   control.button.click();
   assert.equal(signal.aborted, true);
   assert.ok(client.cancellations > cancellations);
-  assert.match(control.progress.textContent, /Preparation stopped/);
+  assert.match(control.work.textContent, /Preparation stopped/);
   client.finish(0, [roadAB]);
   assert.equal(await snapshot, false);
   background.progress(0, 2); // A late notification must not resurrect the progress UI.
@@ -548,7 +548,7 @@ test('Cancel aborts asynchronous preparation and late worker results cannot save
   assert.equal(cache.serialize().routes.length, 0);
   assert.equal(mainConnections(map)[0].properties.connectionKind, 'fallback');
   assert.equal(control.button.textContent, 'Prepare road routes');
-  assert.match(control.progress.textContent, /Preparation stopped/);
+  assert.match(control.work.textContent, /Preparation stopped/);
   assert.deepEqual(errors, []);
   assertOriginalResources(map);
   overlay.destroy();
@@ -1245,7 +1245,7 @@ test('a queued map reuses routes saved by the preceding map without allocating a
   assert.equal(mainConnections(second.map)[0].properties.connectionKind, 'road');
   assert.equal(preparationControl(second.host).count.textContent, 'Road routes: 1/1');
   assert.equal(preparationControl(second.host).button.hidden, true);
-  assert.doesNotMatch(preparationControl(second.host).progress.textContent, /no detailed road/i);
+  assert.doesNotMatch(preparationControl(second.host).work.textContent, /no detailed road/i);
   assert.equal(policy.serialize().attempts.length, 0);
   first.overlay.destroy(); second.overlay.destroy();
 });
@@ -1268,7 +1268,7 @@ test('a queued automatic map respects a no-path cooldown written by the precedin
   assert.equal(mainConnections(second.map)[0].properties.connectionKind, 'fallback');
   assert.equal(preparationControl(second.host).count.textContent, 'Road routes: 0/1');
   assert.equal(preparationControl(second.host).button.hidden, true);
-  assert.doesNotMatch(preparationControl(second.host).progress.textContent, /no detailed road/i);
+  assert.doesNotMatch(preparationControl(second.host).work.textContent, /no detailed road/i);
   first.overlay.destroy(); second.overlay.destroy();
 });
 
@@ -1350,9 +1350,9 @@ test('the production 30 km default draws long grouped connections as solid color
   assert.ok(subject.ledger.serialize().tasks.every(task => task.state === 'direct' && task.areas.length === 0));
   assert.match(allElementText(subject.host), /Day 1/);
   assert.match(allElementText(subject.host), /Day 2/);
-  assert.match(allElementText(subject.host), /Road routes: 0\/0 eligible/);
+  assert.match(allElementText(subject.host), /Road routes: 0\/0/);
   assert.match(allElementText(subject.host), /Skipped by distance: 2/);
-  assert.match(allElementText(subject.host), /Processed 0\/0 eligible connections \(100%\) · Remaining: 0 \(0%\) · Skipped by distance: 2/);
+  assert.match(allElementText(subject.host), /0\/0 processed · 0 left \(0%\)/);
   assert.equal(preparationControl(subject.host).button.hidden, true);
   assert.equal(subject.background.calls.length, 0);
   assert.equal(subject.client.calls.length, 0);
@@ -1466,9 +1466,9 @@ test('mixed saved and distance-skipped groups exclude straight connections from 
   assert.equal(progress.unavailable, 0);
   assert.equal(progress.percentRemaining, 0);
   assert.deepEqual(mainConnections(subject.map).map(feature => feature.properties.connectionKind).sort(), ['direct', 'road']);
-  assert.match(allElementText(subject.host), /Road routes: 1\/1 eligible/);
+  assert.match(allElementText(subject.host), /Road routes: 1\/1/);
   assert.match(allElementText(subject.host), /Ready: 1 · Skipped by distance: 1 · No path: 0/);
-  assert.match(allElementText(subject.host), /Processed 1\/1 eligible connections \(100%\) · Remaining: 0 \(0%\) · Skipped by distance: 1/);
+  assert.match(allElementText(subject.host), /1\/1 processed · 0 left \(0%\)/);
   assert.equal(preparationControl(subject.host).button.hidden, true);
   assertMatchingArrowImages(subject.map);
   assert.equal(subject.background.calls.length, 0);
@@ -1497,8 +1497,8 @@ test('a queued short connection remains half the eligible work while a long skip
   assert.equal(progress.queued, 1);
   assert.equal(progress.percentComplete, 50);
   assert.equal(progress.percentRemaining, 50);
-  assert.match(allElementText(subject.host), /Road routes: 1\/2 eligible/);
-  assert.match(allElementText(subject.host), /Processed 1\/2 eligible connections \(50%\) · Remaining: 1 \(50%\) · Skipped by distance: 1/);
+  assert.match(allElementText(subject.host), /Road routes: 1\/2/);
+  assert.match(allElementText(subject.host), /1\/2 processed · 1 left \(50%\)/);
   assert.equal(subject.background.calls.length, 0);
   assert.equal(subject.client.calls.length, 0);
   assert.deepEqual(subject.errors, []);
@@ -1550,7 +1550,7 @@ test('production smart integration migrates every legacy cached connection beyon
   assert.ok(subject.ledger.serialize().tasks.every(task => task.route));
   assert.equal(subject.client.calls.length, 0);
   assert.equal(subject.background.calls.length, 0);
-  assert.match(allElementText(subject.host), /Processed 225\/225 eligible connections \(100%\) · Remaining: 0 \(0%\)/);
+  assert.match(allElementText(subject.host), /225\/225 processed · 0 left \(0%\)/);
   assertOriginalResources(subject.map);
   assert.deepEqual(subject.errors, []);
   subject.overlay.destroy();
@@ -1559,7 +1559,7 @@ test('production smart integration migrates every legacy cached connection beyon
 test('production queue progress uses processed attempts, passes the global Eco working profile and persists a newly found route', async () => {
   const subject = smartPreparationSetup();
   subject.overlay.update();
-  assert.match(allElementText(subject.host), /Processed 0\/1 eligible connections \(0%\) · Remaining: 1 \(100%\)/);
+  assert.match(allElementText(subject.host), /0\/1 processed · 1 left \(100%\)/);
   assert.match(allElementText(subject.host), /Eco/);
   const operation = subject.overlay.prepareRoadRoutes(false, false);
   assert.equal(preparationControl(subject.host).button.textContent, 'Pause');
@@ -1577,7 +1577,7 @@ test('production queue progress uses processed attempts, passes the global Eco w
   assert.equal(subject.ledger.snapshot().ready, 1);
   assert.equal(subject.ledger.snapshot().percentRemaining, 0);
   assert.deepEqual(subject.ledger.serialize().tasks[0].route, cityRoute);
-  assert.match(allElementText(subject.host), /Processed 1\/1 eligible connections \(100%\) · Remaining: 0 \(0%\)/);
+  assert.match(allElementText(subject.host), /1\/1 processed · 0 left \(0%\)/);
   assert.deepEqual(subject.cameraMoves, []);
   assert.deepEqual(subject.errors, []);
   subject.overlay.destroy();
@@ -1721,10 +1721,48 @@ test('a source-style change migrates an already retained positive path into its 
   assert.equal(subject.ledger.snapshot().total, 2);
   assert.equal(subject.ledger.snapshot().ready, 2);
   assert.equal(mainConnections(subject.map)[0].properties.connectionKind, 'road');
-  assert.match(allElementText(subject.host), /Processed 1\/1 eligible connections \(100%\) · Remaining: 0 \(0%\)/);
+  assert.match(allElementText(subject.host), /1\/1 processed · 0 left \(0%\)/);
   assert.equal(subject.background.calls.length, 0);
   assert.equal(subject.client.calls.length, 0);
   assert.equal(subject.cache.serialize().routes.length, 0);
   assert.deepEqual(subject.errors, []);
   assertOriginalResources(subject.map); subject.overlay.destroy();
+});
+
+test('shared saved roads render as separate lanes with matching arrows without changing cached paths or Maps pins', () => {
+  const cache = new RoadRouteCache();
+  const subject = setup(true, undefined, cache);
+  const { overlay, map, settings, view, errors } = subject;
+  const a1 = groupedMarker('a1.md', 1, 1, 'A');
+  const a2 = groupedMarker('a2.md', 2, 2, 'A');
+  const b1 = groupedMarker('b1.md', 2, 1, 'B');
+  const b2 = groupedMarker('b2.md', 1, 2, 'B');
+  const c1 = groupedMarker('c1.md', 1, 1, 'C');
+  const c2 = groupedMarker('c2.md', 2, 2, 'C');
+  view.markerManager.markers = [a1, a2, b1, b2, c1, c2];
+  const saved: RoadRoute = { coordinates: [[1, 1], [2, 2]], distance: 100 };
+  cache.set(markerRouteKey(a1, a2), saved);
+  cache.set(markerRouteKey(b1, b2), { coordinates: [[2, 2], [1, 1]], distance: 100 });
+  settings[KEYS.group] = 'route';
+  settings[KEYS.routeMode] = 'local';
+  overlay.update();
+  const roads = mainConnections(map);
+  assert.equal(roads.length, 3);
+  assert.deepEqual(roads.map(feature => Number(feature.properties.lineOffset) * (Number(feature.properties.route === 'B') ? -1 : 1)), [-4.5, 0, 4.5]);
+  assert.ok(roads.every(feature => feature.properties.laneArrow === 1));
+  const line = [...map.layers.values()].find(layer => layer.type === 'line')!;
+  const arrow = [...map.layers.values()].find(layer => layer.type === 'symbol')!;
+  assert.deepEqual((line.paint as Record<string, unknown>)['line-offset'], ['get', 'lineOffset']);
+  assert.deepEqual((arrow.layout as Record<string, unknown>)['icon-offset'], ['get', 'iconOffset']);
+  assert.deepEqual(arrow.filter, ['==', ['get', 'laneArrow'], 1]);
+  assert.deepEqual(cache.get(markerRouteKey(a1, a2)), saved);
+  const displayed = directionData(map);
+  const mutations = map.mutations.length;
+  for (let index = 0; index < 20; index++) overlay.update();
+  assert.equal(directionData(map), displayed);
+  assert.equal(map.mutations.length, mutations);
+  assert.deepEqual(view.markerManager.markers.map(marker => marker.coordinates), [[1, 1], [2, 2], [2, 2], [1, 1], [1, 1], [2, 2]]);
+  assert.deepEqual(errors, []);
+  assertOriginalResources(map);
+  overlay.destroy();
 });

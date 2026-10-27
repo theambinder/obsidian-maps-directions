@@ -4,6 +4,7 @@ import type { RoadClipBounds } from './road-clipping';
 import type { RoutingJob } from './routing-protocol';
 import type { TripSplitPath, TripSplitProgress } from './trip-queue';
 import type { TripProcessorOptions } from './trip-processor';
+import { findTripGuide, guidedTripWindow } from './trip-guide';
 
 const EARTH = 6371008.8, RAD = Math.PI / 180, WORLD = 2 * Math.PI * EARTH;
 const PASSES = [{ step: 450, width: 250 }, { step: 300, width: 650 }, { step: 200, width: 1000 }];
@@ -55,20 +56,38 @@ export async function processSplitTrip(options: TripProcessorOptions, key: strin
   if (!initial || initial.state !== 'preparing') return;
   const active = (): boolean => !signal.aborted && ledger.get(key)?.state === 'preparing' && distanceAllowed();
   let saved = initial.split;
-  for (let pass = saved?.pass ?? 0; pass < PASSES.length && active(); pass++) {
-    const first = splitTripWindow(initial.from, initial.to, pass, 0);
-    let nextPart = saved?.pass === pass && saved.totalParts === first.total ? saved.nextPart : 0;
+  for (const guided of saved?.guided ? [true] : [false, true]) {
+    if (!active()) return;
+    let guide = guided && saved?.guided ? saved.guide : undefined;
+    if (guided && !guide) {
+      if (options.visible && !options.visible()) throw new Error('The map is no longer visible.');
+      ledger.setSplit(key, { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [], guided: true });
+      const found = await findTripGuide(options, key, active);
+      if (!active()) return;
+      if (options.visible && !options.visible()) throw new Error('The map is no longer visible.');
+      if (!found) {
+        ledger.finish(key, 'unavailable', 'Automatic guided search could not find an allowed walking detour in the available bounded overview data. Missing map detail, walking restrictions or transport crossings may prevent routing; this is not proof that no path exists.');
+        return;
+      }
+      guide = found;
+      saved = { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [], guided: true, guide };
+      ledger.setSplit(key, saved);
+    }
+  for (let pass = !!saved?.guided === guided ? saved?.pass ?? 0 : 0; pass < PASSES.length && active(); pass++) {
+    const first = guide ? guidedTripWindow(guide, pass, 0) : splitTripWindow(initial.from, initial.to, pass, 0);
+    let nextPart = !!saved?.guided === guided && saved?.pass === pass && saved.totalParts === first.total ? saved.nextPart : 0;
     let frontier = nextPart > 0 ? saved!.frontier : [];
-    const checkpoint = (): TripSplitProgress => ({ version: 1, pass, nextPart, totalParts: first.total, frontier });
+    const checkpoint = (): TripSplitProgress => ({ version: 1, pass, nextPart, totalParts: first.total, frontier, ...(guided ? { guided: true, guide } : {}) });
     ledger.setSplit(key, checkpoint());
     let failed = false;
     while (nextPart < first.total && active()) {
       if (options.visible && !options.visible()) throw new Error('The map is no longer visible.');
-      const window = splitTripWindow(initial.from, initial.to, pass, nextPart), last = nextPart === first.total - 1;
+      const guidedWindow = guide ? guidedTripWindow(guide, pass, nextPart) : undefined;
+      const window = guidedWindow ?? splitTripWindow(initial.from, initial.to, pass, nextPart), last = nextPart === first.total - 1;
       const profile = options.profile();
       client.configure?.(profile.workerTimeoutMs);
       options.onProgress?.({ key, completed: nextPart, total: first.total, unit: 'sections',
-        message: `Preparing smaller sections: ${nextPart}/${first.total} saved (attempt ${pass + 1}/${PASSES.length}).` });
+        message: `Preparing ${guided ? 'guided road' : 'smaller'} sections: ${nextPart}/${first.total} saved (attempt ${pass + 1}/${PASSES.length}).` });
       let accepted: TripSplitPath[] = [], completed: RoadRoute | null = null;
       for (let attempt = 0; attempt < 2 && active() && !accepted.length && !completed; attempt++) {
         try {
@@ -81,7 +100,7 @@ export async function processSplitTrip(options: TripProcessorOptions, key: strin
               const cancel = (): void => client.cancel();
               chunkSignal.addEventListener('abort', cancel, { once: true });
               try {
-                const portalResult = await client.route(snapshot, [], last ? undefined : { from: initial.from, to: initial.to, center: window.to, halfWidthMeters: window.width, maxPortals: 8 });
+                const portalResult = await client.route(snapshot, [], last ? undefined : { from: guidedWindow?.gateFrom ?? initial.from, to: guidedWindow?.gateTo ?? initial.to, center: window.to, halfWidthMeters: window.width, maxPortals: 8 });
                 if (!active() || chunkSignal.aborted) return false;
                 const portals = last ? [] : portalResult.portals ?? [];
                 const origins: Array<TripSplitPath | null> = nextPart === 0 ? [null] : frontier;
@@ -119,7 +138,7 @@ export async function processSplitTrip(options: TripProcessorOptions, key: strin
       }
       if (!active()) return;
       if (completed) {
-        if (ledger.finish(key, 'ready', 'Walking path assembled from verified local road sections.', completed)) options.onRoute?.(key, completed);
+        if (ledger.finish(key, 'ready', `Walking path assembled from verified ${guided ? 'guided ' : ''}local road sections.`, completed)) options.onRoute?.(key, completed);
         return;
       }
       if (!accepted.length) { failed = true; break; }
@@ -132,12 +151,14 @@ export async function processSplitTrip(options: TripProcessorOptions, key: strin
     if (!failed) break;
     saved = undefined;
     if (pass + 1 < PASSES.length) {
-      ledger.setSplit(key, { version: 1, pass: pass + 1, nextPart: 0, totalParts: 0, frontier: [] });
+      ledger.setSplit(key, { version: 1, pass: pass + 1, nextPart: 0, totalParts: 0, frontier: [], ...(guided ? { guided: true, guide } : {}) });
       options.onProgress?.({ key, completed: 0, total: 0, unit: 'sections', message: 'Trying a wider corridor with smaller sections. Saved routes for other connections are kept.' });
       if (options.profile().pauseMs > 0) await pause(options.profile().pauseMs, signal);
     }
   }
-  if (active()) ledger.finish(key, 'unavailable', 'Automatic section searches could not assemble a connected walking path from the available road data. Barriers, missing detail or local data limits may prevent routing; this is not proof that no path exists.');
+  if (guided && active()) ledger.finish(key, 'unavailable', 'Automatic guided search could not verify every detailed walking section of the detour. Barriers, missing detail, walking restrictions or local data limits may prevent routing; this is not proof that no path exists.');
+  saved = undefined;
+  }
 }
 
 function pause(ms: number, signal: AbortSignal): Promise<void> {

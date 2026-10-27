@@ -1,7 +1,7 @@
 {
   "id": "maps-directions",
   "name": "Maps Directions",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "minAppVersion": "1.13.1",
   "description": "Add ordered lines, arrows and local road paths to the official Maps layout in Bases while keeping its markers and backgrounds.",
   "author": "ambinder",

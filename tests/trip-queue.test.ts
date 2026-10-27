@@ -489,6 +489,73 @@ test('split checkpoint input, returned task, serialization and loaded checkpoint
   assert.deepEqual(reopened.get('a')?.split, splitProgress());
 });
 
+test('guided search checkpoints reload without promoting coarse guidance to a finished road path', () => {
+  const queue = new TripQueue(); queue.reconcile([connection('pending'), connection('guided'), connection('ordinary')]);
+  for (const key of ['pending', 'guided', 'ordinary']) queue.start(key);
+  const pending: TripSplitProgress = { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [], guided: true };
+  const guided: TripSplitProgress = { ...splitProgress(), guided: true, guide: structuredClone(route) };
+  assert.equal(queue.setSplit('pending', pending), true);
+  assert.equal(queue.setSplit('guided', guided), true);
+  assert.equal(queue.setSplit('ordinary', { ...splitProgress(), guided: false }), true);
+  const restored = new TripQueue(JSON.parse(JSON.stringify(queue.serialize())));
+  assert.deepEqual(restored.get('pending')?.split, pending);
+  assert.deepEqual(restored.get('guided')?.split, guided);
+  assert.equal(restored.get('ordinary')?.split?.guided, false);
+  for (const key of ['pending', 'guided', 'ordinary']) {
+    assert.equal(restored.get(key)?.state, 'queued');
+    assert.equal(restored.get(key)?.route, undefined);
+  }
+  assert.equal(restored.snapshot().ready, 0);
+  assert.equal(restored.snapshot().processed, 0);
+  assert.equal(queue.finish('guided', 'ready'), false);
+  assert.equal(queue.get('guided')?.route, undefined);
+  assert.equal(queue.finish('guided', 'unavailable', 'Guided refinement had insufficient map detail.'), true);
+  assert.equal(queue.get('guided')?.split, undefined);
+  assert.equal(queue.get('guided')?.route, undefined);
+});
+
+test('saved coarse guide geometry is copied defensively through checkpoint, read, queue and reload APIs', () => {
+  const queue = new TripQueue(); queue.reconcile([connection('a')]); queue.start('a');
+  const progress: TripSplitProgress = { ...splitProgress(), guided: true, guide: structuredClone(route) };
+  assert.equal(queue.setSplit('a', progress), true);
+  progress.guide!.coordinates[0][0] = 0;
+  progress.guide!.distance = 0;
+  const read = queue.get('a')!; read.split!.guide!.coordinates[1][0] = 0;
+  const serialized = queue.serialize();
+  const restored = new TripQueue(serialized);
+  serialized.tasks[0].split!.guide!.coordinates[2][0] = 0;
+  serialized.tasks[0].split!.guide!.distance = 0;
+  const expected = { ...splitProgress(), guided: true, guide: route };
+  assert.deepEqual(queue.get('a')?.split, expected);
+  assert.deepEqual(restored.get('a')?.split, expected);
+  const next = restored.next()!; next.split!.guide!.coordinates[0][0] = 0;
+  assert.deepEqual(restored.get('a')?.split, expected);
+});
+
+test('guided checkpoints reject malformed flags and invalid or unguided coarse routes on input and reload', () => {
+  const queue = new TripQueue(); queue.reconcile([connection('a')]); queue.start('a');
+  const ordinary = splitProgress();
+  const candidates: unknown[] = [
+    ...[null, 0, 1, 'true', {}, []].map(guided => ({ ...ordinary, guided })),
+    { ...ordinary, guide: route }, { ...ordinary, guided: false, guide: route },
+    { ...ordinary, guided: true, guide: null }, { ...ordinary, guided: true, guide: {} },
+    { ...ordinary, guided: true, guide: { ...route, distance: -1 } },
+    { ...ordinary, guided: true, guide: { ...route, distance: Infinity } },
+    { ...ordinary, guided: true, guide: { ...route, coordinates: [[114, 22]] } },
+    { ...ordinary, guided: true, guide: { ...route, coordinates: [[114, 22], [NaN, 22]] } },
+    { ...ordinary, guided: true, guide: { ...route, coordinates: Array(2) } },
+  ];
+  for (const invalid of candidates) {
+    assert.equal(queue.setSplit('a', invalid as TripSplitProgress), false);
+    const saved = queue.serialize();
+    (saved.tasks[0] as unknown as Record<string, unknown>).split = invalid;
+    const restored = new TripQueue(saved);
+    assert.equal(restored.get('a')?.split, undefined);
+    assert.equal(restored.get('a')?.route, undefined);
+    assert.equal(restored.get('a')?.state, 'queued');
+  }
+});
+
 test('split checkpoints validate versions, passes, cursors, frontier bounds, finite anchors and connected seams', () => {
   const queue = new TripQueue(); queue.reconcile([connection('a')]); queue.start('a');
   const valid = splitProgress();
@@ -624,6 +691,51 @@ test('legacy budget migration leaves distance exclusions untouched until restore
   assert.equal(reopened.upgradeBudgetPauses(), 1);
   assert.equal(reopened.get('direct')?.state, 'queued');
   assert.equal(reopened.snapshot().processed, 3);
+});
+
+test('guided migration selects only the exact legacy unavailable failure and initializes it once', () => {
+  const legacyReason = 'Automatic section searches could not assemble a connected walking path from the available road data. Barriers, missing detail or local data limits may prevent routing; this is not proof that no path exists.';
+  let saves = 0;
+  const queue = new TripQueue(undefined, () => saves++, () => 123);
+  queue.reconcile(['legacy-a', 'legacy-b', 'other', 'similar', 'paused', 'no-path', 'ready', 'queued', 'active', 'direct'].map(connection));
+  queue.finish('legacy-a', 'unavailable', legacyReason);
+  queue.finish('legacy-b', 'unavailable', legacyReason);
+  queue.finish('other', 'unavailable', 'Road detail was unavailable.');
+  queue.finish('similar', 'unavailable', `${legacyReason} Extra detail.`);
+  queue.pause('paused', legacyReason);
+  queue.finish('no-path', 'no-path', legacyReason);
+  queue.finish('ready', 'ready', legacyReason, route);
+  queue.start('active');
+  queue.finish('direct', 'unavailable', legacyReason); queue.setDirect('direct');
+  const preservedKeys = ['other', 'similar', 'paused', 'no-path', 'ready', 'queued', 'active', 'direct'];
+  const preserved = preservedKeys.map(key => queue.get(key));
+  const before = saves;
+  assert.equal(queue.upgradeGuidedSearchFailures(['legacy-a', 'legacy-a', 'missing']), 1);
+  assert.equal(saves, before + 1);
+  assert.equal(queue.upgradeGuidedSearchFailures(), 1);
+  assert.equal(saves, before + 2);
+  for (const key of ['legacy-a', 'legacy-b']) {
+    const task = queue.get(key)!;
+    assert.equal(task.state, 'queued'); assert.equal(task.nextArea, 0);
+    assert.equal(task.reason, undefined); assert.equal(task.restarted, true); assert.equal(task.updatedAt, 123);
+    assert.deepEqual(task.split, { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [], guided: true });
+    assert.equal(task.route, undefined);
+  }
+  assert.deepEqual(preservedKeys.map(key => queue.get(key)), preserved);
+  assert.equal(queue.upgradeGuidedSearchFailures(), 0);
+  assert.equal(saves, before + 2);
+  const restored = new TripQueue(JSON.parse(JSON.stringify(queue.serialize())));
+  assert.equal(restored.upgradeGuidedSearchFailures(), 0);
+  assert.equal(restored.get('paused')?.state, 'paused');
+  restored.start('legacy-a');
+  restored.finish('legacy-a', 'unavailable', 'Guided section searches could not assemble a connected walking path.');
+  assert.equal(restored.upgradeGuidedSearchFailures(), 0);
+  assert.equal(restored.get('legacy-a')?.state, 'unavailable');
+  assert.equal(restored.get('legacy-a')?.split, undefined);
+  restored.restoreDirect('direct');
+  assert.equal(restored.upgradeGuidedSearchFailures(['direct']), 1);
+  assert.equal(restored.get('direct')?.state, 'queued');
+  assert.equal(restored.get('direct')?.split?.guided, true);
 });
 
 test('changing pin access retries unresolved outcomes and active split prefixes while retaining saved paths and pauses', () => {

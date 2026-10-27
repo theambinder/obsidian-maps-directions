@@ -12,6 +12,10 @@ export interface TripSplitProgress {
   nextPart: number;
   totalParts: number;
   frontier: TripSplitPath[];
+  /** Guided refinement replaces the earlier straight corridor passes. */
+  guided?: boolean;
+  /** Coarse search guidance only; it is never promoted to a finished route. */
+  guide?: RoadRoute;
 }
 export interface TripTask extends TripConnection {
   state: TripTaskState;
@@ -66,6 +70,8 @@ const cloneArea = (area: TripArea): TripArea => ({ center: [...area.center], zoo
 const cloneRoute = (route: RoadRoute): RoadRoute => ({ distance: route.distance, coordinates: route.coordinates.map(coordinate => [...coordinate]) });
 const cloneSplit = (split: TripSplitProgress): TripSplitProgress => ({
   version: 1, pass: split.pass, nextPart: split.nextPart, totalParts: split.totalParts,
+  ...(split.guided !== undefined ? { guided: split.guided } : {}),
+  ...(split.guide ? { guide: cloneRoute(split.guide) } : {}),
   frontier: split.frontier.map(path => ({ anchor: { point: [...path.anchor.point], grade: path.anchor.grade,
     ...(path.anchor.bearing !== undefined ? { bearing: path.anchor.bearing } : {}) }, route: cloneRoute(path.route) })),
 });
@@ -83,6 +89,8 @@ const validSplit = (value: unknown): value is TripSplitProgress => {
     !Number.isSafeInteger(split.nextPart) || split.nextPart! < 0 || !Number.isSafeInteger(split.totalParts) ||
     split.totalParts! < 0 || split.nextPart! > split.totalParts! || !Array.isArray(split.frontier) ||
     split.frontier.length > 12 || split.nextPart! > 0 && split.frontier.length === 0) return false;
+  if (split.guided !== undefined && typeof split.guided !== 'boolean' ||
+    split.guide !== undefined && (split.guided !== true || !validRoute(split.guide))) return false;
   return Array.from(split.frontier).every(path => {
     if (!path || typeof path !== 'object' || !path.anchor || typeof path.anchor !== 'object') return false;
     const { anchor, route } = path;
@@ -109,6 +117,7 @@ const LEGACY_BUDGET_REASONS = new Set([
   'Working data limit in Balanced. Select a larger workload mode and Resume.',
   'Working data limit in Maximum. This connection needs a different search strategy or regional routing data; progress is saved.',
 ]);
+const LEGACY_GUIDED_SEARCH_FAILURE_REASON = 'Automatic section searches could not assemble a connected walking path from the available road data. Barriers, missing detail or local data limits may prevent routing; this is not proof that no path exists.';
 
 /** Endpoints are ordered; source configuration is hashed rather than saved as a URL. */
 export function tripConnectionKey(from: RoadCoordinate, to: RoadCoordinate, sourceContext: string): string {
@@ -298,6 +307,18 @@ export class TripQueue {
       if (task.state !== 'paused' || task.split || !task.reason || !LEGACY_BUDGET_REASONS.has(task.reason)) continue;
       task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.restarted = true;
       task.split = { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [] };
+      task.updatedAt = this.now(); upgraded++;
+    }
+    if (upgraded) this.onChange();
+    return upgraded;
+  }
+  /** Retry only the known pre-guidance section failure with the new saved strategy. */
+  upgradeGuidedSearchFailures(keys?: readonly string[]): number {
+    let upgraded = 0;
+    for (const task of this.selected(keys)) {
+      if (task.state !== 'unavailable' || task.reason !== LEGACY_GUIDED_SEARCH_FAILURE_REASON) continue;
+      task.state = 'queued'; task.nextArea = 0; task.reason = undefined; task.restarted = true;
+      task.split = { version: 1, pass: 0, nextPart: 0, totalParts: 0, frontier: [], guided: true };
       task.updatedAt = this.now(); upgraded++;
     }
     if (upgraded) this.onChange();
