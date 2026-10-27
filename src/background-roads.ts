@@ -1,8 +1,10 @@
-import { collectLocalRoads, MIN_ROAD_ZOOM, type RoadSnapshot } from './local-roads';
+import { collectLocalRoads, MIN_ROAD_ZOOM, type RoadSnapshot, type RoadCollectionOptions } from './local-roads';
 import { normalizeLongitude } from './geometry';
 import type { RoadFeature } from './road-graph';
 
 export type RoadPreparationCenter = [number, number];
+export interface RoadPreparationTarget { center: RoadPreparationCenter; zoom: number }
+export interface RoadPreparationArea { index: number; target: RoadPreparationTarget; waitTimedOut: boolean }
 export interface RoadPreparationStyle {
   version: 8;
   sources: Record<string, Record<string, unknown>>;
@@ -35,7 +37,7 @@ export interface BackgroundRoadMapOptions {
   trackResize: false;
   renderWorldCopies: false;
   pixelRatio: 1;
-  maxTileCacheSize: 32;
+  maxTileCacheSize: number;
   fadeDuration: 0;
 }
 export type BackgroundRoadMapFactory = (options: BackgroundRoadMapOptions) => BackgroundRoadMap;
@@ -45,11 +47,15 @@ export interface RoadPreparationResult extends RoadPreparationProgress { timedOu
 export interface BackgroundRoadPreparationOptions {
   factory: BackgroundRoadMapFactory;
   signal?: AbortSignal;
-  onSnapshot: (snapshot: RoadSnapshot, signal: AbortSignal) => unknown | Promise<unknown>;
+  onSnapshot: (snapshot: RoadSnapshot, signal: AbortSignal, area?: RoadPreparationArea) => unknown | Promise<unknown>;
   onProgress?: (progress: RoadPreparationProgress) => void;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  tileCacheSize?: number;
+  roadLimits?: Pick<RoadCollectionOptions, 'maxFeatures' | 'maxPositions'>;
   /** Per-area wait, capped at eight seconds. */
   timeoutMs?: number;
-  /** Whole-operation deadline, capped at two minutes. */
+  /** Deadline for this working chunk, not for the whole trip. At most two minutes. */
   totalTimeoutMs?: number;
 }
 interface OriginalRoadMap {
@@ -57,9 +63,10 @@ interface OriginalRoadMap {
   getContainer?(): HTMLElement;
 }
 
-const MAX_AREAS = 64;
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const number = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+const bounded = (value: number | undefined, fallback: number, min: number, max: number): number =>
+  number(value) ? Math.max(min, Math.min(max, Math.floor(value))) : fallback;
 
 /** Copy only transport vector source configuration; never copy note/marker data. */
 export function buildRoadPreparationStyle(original: unknown): RoadPreparationStyle | null {
@@ -104,7 +111,7 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-function waitForArea(map: BackgroundRoadMap, center: RoadPreparationCenter, timeoutMs: number, signal: AbortSignal): Promise<void> {
+function waitForArea(map: BackgroundRoadMap, target: RoadPreparationTarget, timeoutMs: number, signal: AbortSignal): Promise<boolean> {
   return new Promise((resolve, reject) => {
     let done = false;
     const cleanup = (): void => {
@@ -112,10 +119,10 @@ function waitForArea(map: BackgroundRoadMap, center: RoadPreparationCenter, time
       for (const [event, handler] of listeners) map.off(event, handler);
       signal.removeEventListener('abort', onAbort);
     };
-    const finish = (error?: unknown): void => {
+    const finish = (error?: unknown, timedOut = false): void => {
       if (done) return;
       done = true; cleanup();
-      if (error) reject(error); else resolve();
+      if (error) reject(error); else resolve(timedOut);
     };
     const onAbort = (): void => finish(cancellation());
     const onIdle = (): void => { if (map.isStyleLoaded()) finish(); };
@@ -126,39 +133,47 @@ function waitForArea(map: BackgroundRoadMap, center: RoadPreparationCenter, time
     const listeners: Array<[string, (...args: unknown[]) => void]> = [
       ['idle', onIdle], ['load', onSource], ['sourcedata', onSource], ['error', onError],
     ];
-    const timer = setTimeout(() => finish(), timeoutMs);
+    const timer = setTimeout(() => finish(undefined, true), timeoutMs);
     try {
       for (const [event, handler] of listeners) map.on(event, handler);
       signal.addEventListener('abort', onAbort, { once: true });
       checkAbort(signal);
-      map.jumpTo({ center, zoom: MIN_ROAD_ZOOM });
+      map.jumpTo(target);
     } catch (error) { finish(error); }
   });
 }
 
 /**
- * Explicitly prepare detail in a temporary map using the original Maps runtime.
+ * Prepare one caller-selected working chunk with the original Maps runtime.
+ * The caller owns durable trip progress; no itinerary-length cutoff is applied here.
  * Only that offscreen map moves; the user's map, style and marker sources stay intact.
  */
 export async function prepareBackgroundRoads(
   original: OriginalRoadMap,
-  centers: readonly RoadPreparationCenter[],
+  centers: readonly (RoadPreparationCenter | RoadPreparationTarget)[],
   options: BackgroundRoadPreparationOptions,
 ): Promise<RoadPreparationResult> {
   if (options.signal?.aborted) throw cancellation();
-  const targets = centers.filter(point => Array.isArray(point) && point.length === 2 && number(point[0]) &&
-    number(point[1]) && Math.abs(point[1]) <= 85.051129).slice(0, MAX_AREAS)
-    .map(([longitude, latitude]): RoadPreparationCenter => [normalizeLongitude(longitude), latitude]);
+  const targets = centers.flatMap((input): RoadPreparationTarget[] => {
+    const point = Array.isArray(input) ? input : input?.center;
+    const zoom = Array.isArray(input) ? MIN_ROAD_ZOOM : input?.zoom;
+    if (!Array.isArray(point) || point.length !== 2 || !number(point[0]) || !number(point[1]) ||
+      Math.abs(point[1]) > 85.051129 || !number(zoom) || zoom < 0 || zoom > 16) return [];
+    return [{ center: [normalizeLongitude(point[0]), point[1]], zoom }];
+  });
   const result: RoadPreparationResult = { completed: 0, total: targets.length, ready: 0, timedOut: false };
   if (!targets.length) return result;
   const style = buildRoadPreparationStyle(original.getStyle?.());
   const doc = original.getContainer?.()?.ownerDocument;
   if (!style || !doc?.body) throw new Error('This map background does not expose supported vector roads.');
+  const width = bounded(options.viewportWidth, 1024, 256, 2048);
+  const height = bounded(options.viewportHeight, 768, 256, 2048);
+  const tileCache = bounded(options.tileCacheSize, 32, 4, 128);
   const host = doc.createElement('div');
   host.className = 'obsidian-maps-directions-background-roads';
   host.setAttribute('aria-hidden', 'true');
   Object.assign(host.style, {
-    position: 'fixed', width: '1024px', height: '768px', left: '-100000px', top: '0',
+    position: 'fixed', width: `${width}px`, height: `${height}px`, left: '-100000px', top: '0',
     visibility: 'hidden', pointerEvents: 'none', overflow: 'hidden',
   });
   doc.body.append(host);
@@ -173,26 +188,27 @@ export async function prepareBackgroundRoads(
   try {
     checkAbort(controller.signal);
     map = options.factory({
-      container: host, style, center: targets[0], zoom: MIN_ROAD_ZOOM, minZoom: MIN_ROAD_ZOOM, maxZoom: MIN_ROAD_ZOOM,
+      container: host, style, center: targets[0].center, zoom: targets[0].zoom, minZoom: 0, maxZoom: 16,
       bearing: 0, pitch: 0, interactive: false, attributionControl: false, maplibreLogo: false,
-      trackResize: false, renderWorldCopies: false, pixelRatio: 1, maxTileCacheSize: 32, fadeDuration: 0,
+      trackResize: false, renderWorldCopies: false, pixelRatio: 1, maxTileCacheSize: tileCache, fadeDuration: 0,
     });
     options.onProgress?.({ completed: 0, total: result.total, ready: 0 });
-    for (const center of targets) {
+    for (const [index, target] of targets.entries()) {
       let keepGoing = true;
       checkAbort(controller.signal);
-      await waitForArea(map, center, timeout, controller.signal);
+      const waitTimedOut = await waitForArea(map, target, timeout, controller.signal);
       checkAbort(controller.signal);
       if (map.isStyleLoaded()) {
         const snapshot = collectLocalRoads({
           getStyle: () => map!.getStyle() as ReturnType<NonNullable<import('./contracts').MapLike['getStyle']>>,
           getZoom: () => map!.getZoom(),
           querySourceFeatures: (source, query) => map!.querySourceFeatures(source, query),
-        });
-        if (snapshot.state === 'ready') {
-          keepGoing = await abortable(Promise.resolve(options.onSnapshot(snapshot, controller.signal)), controller.signal) !== false;
-          result.ready++;
-        }
+        }, { ...options.roadLimits, minZoom: target.zoom });
+        keepGoing = await abortable(Promise.resolve(options.onSnapshot(snapshot, controller.signal, { index, target, waitTimedOut })), controller.signal) !== false;
+        if (snapshot.state === 'ready') result.ready++;
+      } else {
+        const snapshot: RoadSnapshot = { key: 'empty', state: 'empty', sources: Object.keys(style.sources), features: [] };
+        keepGoing = await abortable(Promise.resolve(options.onSnapshot(snapshot, controller.signal, { index, target, waitTimedOut })), controller.signal) !== false;
       }
       result.completed++;
       options.onProgress?.({ completed: result.completed, total: result.total, ready: result.ready });

@@ -46,3 +46,21 @@ test('oversized road input fails to fallback instead of building an arbitrary pa
   const huge = { geometry: { type: 'LineString', coordinates: Array.from({ length: 100001 }, () => [139, 35]) }, properties: { class: 'minor' } };
   assert.equal(collectLocalRoads(map([huge])).state, 'limited');
 });
+
+
+test('explicit preparation can read coarse roads without changing the visible-map detail requirement', () => {
+  const source = map([line(139)], 7);
+  assert.equal(collectLocalRoads(source).state, 'zoom');
+  const coarse = collectLocalRoads(source, { minZoom: 7 });
+  assert.equal(coarse.state, 'ready');
+  assert.equal(source.queries, 1);
+  assert.equal(collectLocalRoads(source, { minZoom: 8 }).state, 'zoom');
+});
+
+test('working feature and coordinate budgets are configurable and discard an oversized area explicitly', () => {
+  const roads = [line(139), line(140)];
+  assert.equal(collectLocalRoads(map(roads), { maxFeatures: 1 }).state, 'limited');
+  assert.equal(collectLocalRoads(map(roads), { maxFeatures: 2, maxPositions: 4 }).state, 'ready');
+  assert.equal(collectLocalRoads(map(roads), { maxPositions: 3 }).state, 'limited');
+  assert.equal(collectLocalRoads(map(roads), { maxFeatures: NaN, maxPositions: Infinity }).state, 'ready');
+});

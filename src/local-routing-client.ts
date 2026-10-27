@@ -6,6 +6,7 @@ declare const __LOCAL_ROUTING_WORKER__: string;
 export interface RoutingClient {
   route(snapshot: RoadSnapshot, legs: RoutingJob['legs']): Promise<RoutingResult>;
   cancel(): void;
+  configure?(timeoutMs: number): void;
 }
 
 /** The worker code is bundled into main.js; there is no remote code or routing API. */
@@ -13,6 +14,11 @@ export class LocalRoutingClient implements RoutingClient {
   private worker: Worker | null = null;
   private workerUrl: string | null = null;
   private nextId = 0;
+  private timeoutMs = 8000;
+
+  configure(timeoutMs: number): void {
+    if (Number.isFinite(timeoutMs)) this.timeoutMs = Math.max(1000, Math.min(60000, Math.round(timeoutMs)));
+  }
   private pending: { id: number; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
   async route(snapshot: RoadSnapshot, legs: RoutingJob['legs']): Promise<RoutingResult> {
@@ -25,7 +31,7 @@ export class LocalRoutingClient implements RoutingClient {
     const worker = this.worker;
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.cancel(), 8000);
+      const timer = setTimeout(() => this.cancel(), this.timeoutMs);
       this.pending = { id, reject, timer };
       worker.onmessage = (event: MessageEvent<RoutingResult>) => {
         if (event.data.id !== this.pending?.id) return;

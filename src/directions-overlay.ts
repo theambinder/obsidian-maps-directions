@@ -14,6 +14,10 @@ import { prepareBackgroundRoads, buildRoadPreparationStyle, type BackgroundMapFa
 import { getBackgroundMapFactory } from './adapter';
 import { planRoadPreparation } from './road-preparation-targets';
 import { AutoPreparationPolicy, PreparationQueue, autoPreparationKey } from './auto-preparation';
+import { TripQueue, planTripConnection, tripConnectionKey } from './trip-queue';
+import { processTripQueue } from './trip-processor';
+import { workloadProfile, DEFAULT_WORKLOAD_SETTINGS, type WorkloadProfile } from './workload-settings';
+import type { ResourceSnapshot } from './resource-sampler';
 
 interface PreparationServices {
   factory?: (map: MapLike) => BackgroundMapFactory | null;
@@ -22,6 +26,9 @@ interface PreparationServices {
   queue?: PreparationQueue;
   visible?: (map: MapLike) => boolean;
   autoDelayMs?: number;
+  tripQueue?: TripQueue;
+  workload?: () => WorkloadProfile;
+  resources?: () => ResourceSnapshot;
 }
 
 export const RESOURCE_PREFIX = 'obsidian-maps-directions-';
@@ -99,6 +106,9 @@ export class DirectionsOverlay implements OverlayLike {
   private autoTimer: ReturnType<typeof setTimeout> | null = null;
   private autoInput = '';
   private sourceContext: string | null = null;
+  private smartInput = '';
+  private smartKeys: string[] = [];
+  private smartRouteKeys: string[] = [];
   private readonly onMapEvent = (): void => this.update();
   private readonly onRoadsChanged = (...args: unknown[]): void => {
     const event = args[0] as { sourceId?: string } | undefined;
@@ -158,7 +168,7 @@ export class DirectionsOverlay implements OverlayLike {
       const colored = colorDirections(this.connectionData(map, directData, options.routeMode), this.view.markerManager.markers, { ...options, normalizeColor: this.normalizeColor, palette: this.routePalette });
       const host = map.getContainer?.() ?? null;
       this.legend.update(host, colored, !!options.groupProperty);
-      this.statusControl.update(host, colored, options.routeMode === 'local', this.routingStatus, this.roads?.state !== 'unsupported' && this.preparationFactory(map) ? () => { void this.prepareRoadRoutes(); } : null, this.preparationProgress, () => { this.cancelPreparation(true); this.update(); }, options.autoPrepare);
+      this.statusControl.update(host, colored, options.routeMode === 'local', this.routingStatus, this.roads?.state !== 'unsupported' && this.preparationFactory(map) ? () => { void this.prepareRoadRoutes(false, false); } : null, this.preparationProgress, () => { this.cancelPreparation(true); this.update(); }, options.autoPrepare, this.preparationServices.tripQueue?.snapshot(this.smartKeys), this.preparationServices.resources?.(), this.currentWorkload().label);
       const data: FeatureCollection = { type: 'FeatureCollection', features: colored.features.map(feature => ({
         ...feature, properties: { ...feature.properties, arrowImage: `${this.imageId}-${String(feature.properties.lineColor).slice(1)}` },
       })) };
@@ -266,15 +276,16 @@ export class DirectionsOverlay implements OverlayLike {
     }
     // A route belongs to its endpoints, not to the camera or the current tile set.
     // Cache geometry only; all note properties and access lines use current markers.
+    if (this.preparationServices.tripQueue) return this.smartConnections(map, direct);
     const keys = direct.features.map(routeKey);
-    for (const key of keys.slice(0, 200)) {
+    for (const key of keys) {
       if (this.retainedRoutes.has(key)) continue;
       const cached = this.routeCache.get(key);
       if (cached) this.retainedRoutes.set(key, cached);
     }
-    const currentKeys = new Set(keys.slice(0, 200));
+    const currentKeys = new Set(keys);
     for (const key of this.retainedRoutes.keys()) if (!currentKeys.has(key)) this.retainedRoutes.delete(key);
-    const missing = keys.slice(0, 200).flatMap((key, index) => this.retainedRoutes.has(key) ? [] : [index]);
+    const missing = keys.flatMap((key, index) => this.retainedRoutes.has(key) ? [] : [index]);
     const inputKey = JSON.stringify(direct);
     if (this.preparationController && this.preparationInput !== inputKey) this.cancelPreparation();
     const retainedData = (): FeatureCollection => applyRoadRoutes(direct, {
@@ -349,6 +360,123 @@ export class DirectionsOverlay implements OverlayLike {
     return this.routedData;
   }
 
+  private currentWorkload(): WorkloadProfile {
+    return this.preparationServices.workload?.() ?? workloadProfile(DEFAULT_WORKLOAD_SETTINGS);
+  }
+
+  workloadChanged(): void {
+    this.cancelPreparation();
+    this.clearAutomaticTimer();
+    this.update();
+  }
+
+  private smartConnections(map: MapLike, direct: FeatureCollection): FeatureCollection {
+    const ledger = this.preparationServices.tripQueue!;
+    const input = JSON.stringify([direct.features.map(feature => feature.geometry.coordinates), this.preparationContext(map)]);
+    const routeInput = JSON.stringify(direct);
+    if (this.preparationController && this.preparationInput !== routeInput) this.cancelPreparation();
+    if (this.smartInput !== input) {
+      this.smartInput = input;
+      const connections = direct.features.map(feature => {
+        const [from, to] = feature.geometry.coordinates;
+        return { key: tripConnectionKey(from, to, this.preparationContext(map)), from, to, areas: planTripConnection(from, to).areas };
+      });
+      ledger.reconcile(connections);
+      this.smartKeys = connections.map(connection => connection.key);
+      this.smartRouteKeys = direct.features.map(routeKey);
+    }
+    const current = new Set(this.smartRouteKeys);
+    for (const key of this.retainedRoutes.keys()) if (!current.has(key)) this.retainedRoutes.delete(key);
+    this.smartKeys.forEach((key, index) => {
+      const routeKey = this.smartRouteKeys[index];
+      if (this.retainedRoutes.has(routeKey)) {
+        if (ledger.status(key)?.state !== 'ready') ledger.finish(key, 'ready', 'Restored retained path.', this.retainedRoutes.get(routeKey)!);
+        return;
+      }
+      const task = ledger.get(key);
+      const route = task?.state === 'ready' ? task.route : this.routeCache.get(routeKey);
+      if (route) { this.retainedRoutes.set(routeKey, route); if (task?.state !== 'ready') ledger.finish(key, 'ready', 'Restored saved path.', route); }
+    });
+    const result = applyRoadRoutes(direct, { id: 0, routes: this.smartRouteKeys.map(key => this.retainedRoutes.get(key) ?? null), stats: { nodes: 0, edges: 0, truncated: false } });
+    this.routedData = result;
+    const progress = ledger.snapshot(this.smartKeys);
+    const paused = this.smartKeys.map(key => ledger.status(key)).find(task => task?.state === 'paused');
+    this.routingStatus = `Processed ${progress.processed}/${progress.total} connections; ${progress.percentRemaining}% remaining. Found ${progress.ready} road paths. ${progress.noPath} no walking path; ${progress.unavailable} data unavailable; ${progress.paused} paused.${paused?.reason ? ` ${paused.reason}` : ''}`;
+    return result;
+  }
+
+  private scheduleSmart(map: MapLike, direct: FeatureCollection, options: DirectionOptions): void {
+    const ledger = this.preparationServices.tripQueue!;
+    if (!options.autoPrepare || options.routeMode !== 'local' || !this.mapVisible(map) || this.preparationController || !this.preparationFactory(map) || !ledger.next(this.smartKeys)) { this.clearAutomaticTimer(); return; }
+    const input = JSON.stringify([this.smartKeys, direct.features.map(feature => feature.geometry.coordinates)]);
+    if (this.autoTimer && this.autoInput === input) return;
+    this.clearAutomaticTimer(); this.autoInput = input;
+    this.autoTimer = setTimeout(() => {
+      this.autoTimer = null; this.autoInput = '';
+      if (!this.destroyed && this.map === map) void this.prepareSmartTrip(true, false);
+    }, this.preparationServices.autoDelayMs ?? 750);
+  }
+
+  private async prepareSmartTrip(automatic: boolean, retryAll: boolean): Promise<void> {
+    const ledger = this.preparationServices.tripQueue!;
+    if (this.destroyed || this.suspended || this.preparationController) return;
+    const options = readOptions(this.view.config), map = this.map;
+    if (!map || !options.enabled || options.routeMode !== 'local' || !options.sequenceProperty || automatic && (!options.autoPrepare || !this.mapVisible(map))) return;
+    this.clearAutomaticTimer();
+    const factory = this.preparationFactory(map);
+    if (!factory) return;
+    const direct = buildDirections(this.view.markerManager.markers, options.sequenceProperty, options.groupProperty);
+    this.smartConnections(map, direct);
+    if (!automatic) for (const key of this.smartKeys) {
+      const task = ledger.get(key);
+      if (task?.state === 'paused') ledger.resume(key);
+      else if (retryAll && (task?.state === 'no-path' || task?.state === 'unavailable')) ledger.retry(key);
+    }
+    if (!ledger.next(this.smartKeys)) { this.update(); return; }
+    this.stopRoutingJob();
+    const controller = new AbortController();
+    this.preparationController = controller;
+    this.preparationAutomatic = automatic;
+    this.preparationInput = JSON.stringify(direct);
+    this.preparationProgress = { running: true, completed: 0, total: 0, message: 'Processing saved trip queue.' };
+    this.update();
+    try {
+      await processTripQueue({
+        original: map, keys: [...this.smartKeys], ledger, serial: this.preparationQueue, factory,
+        client: this.routingClient, profile: () => this.currentWorkload(), signal: controller.signal,
+        run: this.preparationServices.run, visible: () => !automatic || this.mapVisible(map),
+        onProgress: progress => {
+          if (this.destroyed || controller.signal.aborted || this.preparationController !== controller) return;
+          this.preparationProgress = { running: true, completed: progress.completed, total: progress.total, message: progress.message };
+          this.update();
+        },
+        onRoute: (key, route) => {
+          if (this.destroyed || controller.signal.aborted || this.preparationController !== controller) return;
+          this.smartKeys.forEach((candidate, index) => {
+            if (candidate !== key) return;
+            this.retainedRoutes.set(this.smartRouteKeys[index], route);
+            this.routeCache.set(this.smartRouteKeys[index], route);
+          });
+          this.update();
+        },
+      });
+      if (!controller.signal.aborted) {
+        const progress = ledger.snapshot(this.smartKeys);
+        this.preparationProgress = { running: false, completed: 0, total: 0, message: progress.paused ? `${progress.paused} connections paused. Open Why dashed lines? for the reason, choose a larger workload if needed, then Resume.` : 'Queue processing finished. Results and progress are saved.' };
+      }
+    } catch {
+      if (!controller.signal.aborted) this.preparationProgress = { running: false, completed: 0, total: 0, message: 'Queue interrupted. Completed connections are saved.' };
+    } finally {
+      if (this.preparationController === controller) {
+        this.preparationController = null; this.preparationInput = ''; this.preparationAutomatic = false;
+        this.update();
+      } else if (!this.destroyed && this.preparationController === null) {
+        // An interrupted processor may have just requeued its unfinished connection.
+        this.update();
+      }
+    }
+  }
+
   private preparationContext(map: MapLike): string {
     if (this.sourceContext === null) this.sourceContext = JSON.stringify(buildRoadPreparationStyle(map.getStyle?.()));
     return this.sourceContext;
@@ -371,10 +499,11 @@ export class DirectionsOverlay implements OverlayLike {
   }
 
   private scheduleAutomatic(map: MapLike, direct: FeatureCollection, options: DirectionOptions): void {
+    if (this.preparationServices.tripQueue) { this.scheduleSmart(map, direct, options); return; }
     if (!options.autoPrepare || options.routeMode !== 'local' || !this.mapVisible(map) || this.preparationController || this.pendingInputKey ||
       this.roads?.state === 'unsupported' || !this.preparationFactory(map)) { this.clearAutomaticTimer(); return; }
     const context = this.preparationContext(map);
-    const missing = direct.features.slice(0, 200).map(routeKey).filter(key => !this.retainedRoutes.has(key));
+    const missing = direct.features.map(routeKey).filter(key => !this.retainedRoutes.has(key));
     const eligible = missing.filter(key => {
       const attempt = autoPreparationKey(key, context);
       return !this.cancelledAutomatic.has(attempt) && this.automaticPolicy.shouldAttempt(attempt);
@@ -397,6 +526,10 @@ export class DirectionsOverlay implements OverlayLike {
   private cancelPreparation(suppressAutomatic = false): void {
     const controller = this.preparationController;
     if (!controller) return;
+    if (suppressAutomatic && this.preparationServices.tripQueue) for (const key of this.smartKeys) {
+      const state = this.preparationServices.tripQueue.status(key)?.state;
+      if (state === 'queued' || state === 'preparing') this.preparationServices.tripQueue.pause(key, 'User paused. Resume continues pending connections.');
+    }
     if (suppressAutomatic) for (const key of this.preparationAttemptKeys) {
       this.cancelledAutomatic.add(key);
       if (this.cancelledAutomatic.size > 2000) this.cancelledAutomatic.delete(this.cancelledAutomatic.values().next().value!);
@@ -411,7 +544,8 @@ export class DirectionsOverlay implements OverlayLike {
   }
 
   /** Cached paths draw first; automatic and explicit preparation share the same queue. */
-  async prepareRoadRoutes(automatic = false): Promise<void> {
+  async prepareRoadRoutes(automatic = false, retryAll = true): Promise<void> {
+    if (this.preparationServices.tripQueue) return this.prepareSmartTrip(automatic, retryAll);
     if (this.destroyed || this.suspended || this.preparationController) return;
     const options = readOptions(this.view.config), map = this.map;
     if (!map || !options.enabled || options.routeMode !== 'local' || !options.sequenceProperty) return;
@@ -422,7 +556,7 @@ export class DirectionsOverlay implements OverlayLike {
     const direct = buildDirections(this.view.markerManager.markers, options.sequenceProperty, options.groupProperty);
     const keys = direct.features.map(routeKey);
     const attemptKeys = keys.map(key => autoPreparationKey(key, this.preparationContext(map)));
-    const selected = keys.flatMap((key, index) => index < 200 && !this.retainedRoutes.has(key) &&
+    const selected = keys.flatMap((key, index) => !this.retainedRoutes.has(key) &&
       (!automatic || !this.cancelledAutomatic.has(attemptKeys[index]) && this.automaticPolicy.shouldAttempt(attemptKeys[index])) ? [index] : []);
     const missing = selected.map(index => ({ ...direct.features[index], properties: { ...direct.features[index].properties, connectionKind: 'fallback' } }));
     const center = map.getCenter?.();
@@ -540,6 +674,9 @@ export class DirectionsOverlay implements OverlayLike {
     this.dataSignature = null;
     this.styleSignature = null;
     this.sourceContext = null;
+    this.smartInput = '';
+    this.smartKeys = [];
+    this.smartRouteKeys = [];
     this.legend.destroy();
     this.statusControl.destroy();
     this.detailedRoads.clear();

@@ -1,40 +1,43 @@
-# Maps Directions 0.5.0
+# Maps Directions 0.6.0
 
 Testing prerelease for official Maps 0.2.2.
 
-- Replace independent random hues with a categorical palette that chooses
-  contrasting colors for simultaneous route groups. Preserve assignments while
-  the view stays open, including filtering groups out and back in. The same full
-  group set has deterministic assignments on reopening; an initially filtered
-  subset or newly introduced groups can produce different assignments.
-- Enable Automatically prepare roads by default in Follow roads (local) mode.
-  Show saved paths immediately, then prepare missing connections in the background
-  after the visible view has stayed stable for about 750 ms. No prepare button is
-  required in automatic mode. The visible map remains in place.
-- Share a serial preparation queue across views, with progress and Cancel. Keep
-  found paths when work is stopped. Turning automatic preparation off restores
-  the manual Prepare road routes button.
-- Persist automatic retry cooldowns: 24 hours for a connection with no found path,
-  15 minutes for unavailable data, incomplete preparation or failed attempts. Cancelling suppresses the
-  current view's attempt until reopening or a connection input change.
-- Add Maps Directions: Retry missing road routes to retry without waiting for
-  a cooldown. Panning, zooming, line color changes and style reloads do not by
-  themselves trigger another preparation pass.
-- Keep the existing bounded preparation: one temporary map, a 32-tile cache,
-  64 areas, eight seconds of load waiting per area, two minutes per active job
-  and at most 200 unresolved connections. Long journeys receive endpoint detail.
-- Retain the 500-path/100,000-vertex persistent geometry cache, route legend,
-  property colors and all original Maps marker and background behavior.
+- Replace whole-itinerary cut-offs with a saved per-connection queue. Process
+  connections in small chunks without silently discarding the remaining trip
+  after 64 map areas, 200 connections or two minutes.
+- Persist task state, reasons, area plans and completed route geometry. Previously
+  completed connections stay available after reopening or restarting. An unfinished
+  connection rebuilds its temporary road network; a user-paused task stays paused.
+- Show processed percentage and percentage remaining separately from the count
+  of found road paths. Distinguish Queued, Preparing, Ready, No walking path,
+  Data unavailable and Paused. Processing completion does not promise every route
+  was found.
+- Add Pause/Resume. A working-data or computation limit pauses the affected
+  connection with an explicit reason while other queued connections can continue.
+  Resume uses the current processing mode and does not silently raise budgets.
+- Add global Settings → Maps Directions controls for Processing mode and Pause
+  between chunks. Default Eco uses two areas per chunk, a one-second pause,
+  a 768 × 512 viewport, eight cached tiles and up to 6,000 road lines/50,000
+  coordinates. Balanced and Maximum offer larger working profiles.
+- Use adaptive per-connection overview, corridor and endpoint plans, replacing
+  the silent 30 km endpoint-only rule. Split dense areas into smaller views up to
+  zoom 16; report insufficient regional detail or working-data limits honestly.
+- Store durable completed paths in the trip ledger, independently of the bounded
+  opportunistic cache. There is no silent 500-path eviction of completed trip data.
+- Show available CPU and private-memory measurements for the Obsidian window
+  process, including other plugins. CPU 100% equals one core equivalent and can
+  exceed 100%; memory uses MiB. GPU and other application processes are excluded.
+- Preserve original Maps markers, backgrounds, categorical route colors, arrows
+  and the route legend. No separate routing service or map engine is bundled.
 
-Automatic preparation can add tile and metadata requests to the current
-background's existing vector source providers when a local map opens. New areas
-can use network bandwidth, CPU, GPU memory and battery; saved paths, the shared
-queue and cooldowns avoid unnecessary repeated work. Disable automatic preparation
-for manual control. Internet is needed for data absent from Maps cache.
+Preparing road data can use network bandwidth, CPU, GPU memory and battery.
+Processing mode describes concrete working limits, not a guaranteed CPU or RAM
+percentage. Eco reduces average activity through smaller work and pauses; it can
+still briefly occupy a core. Queue metadata and saved paths grow on disk with
+completed work, while temporary road networks are not saved to disk.
 
-There is no additional routing service, API key or bundled map engine. Attempt
-cooldowns store hashed identifiers and times locally, without raw source URLs or
-group labels. No road database is persisted. Local walking routing remains
-approximate; disconnected paths, ferries, flights and unavailable detail can
-leave dashed connections. Complete routing for every connection is not guaranteed.
-The addon uses undocumented Maps/Bases internals; mobile visual validation is pending.
+Map background data may be fetched from the current provider when absent from
+Maps cache. Walking routing remains approximate. Coarse regional geometry,
+missing connections, ferries and transport legs can remain unresolved even after
+all queued connections are processed. Correct automobile navigation is not added
+in this release. Mobile visual validation is still pending.

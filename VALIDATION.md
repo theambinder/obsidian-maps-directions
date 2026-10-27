@@ -1,3 +1,36 @@
+# Validation — Maps Directions 0.6.0
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.
+
+- All 258 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- The production Map view uses the durable per-connection queue. Cached paths draw
+  first, new work runs in Eco chunks, and the queue does not stop at a whole-trip
+  connection, area or time quota. Temporary road geometry is released per connection.
+- The actual native UI shows processed connections, percentage remaining, found
+  road routes, live window CPU/private-memory readings, Pause and Resume.
+- A measured working-map Eco run completed available work and explicitly paused
+  connections exceeding the Eco working-data budget. Paused tasks remain unfinished;
+  they are not labelled as no walking path or silently discarded.
+- Reloading restored completed results, durable route geometry and paused tasks,
+  without repeating completed work or allocating another preparation map.
+- The native plugin settings tab exposes Processing mode and Pause between chunks;
+  Eco and its one-second pause are the defaults. Settings are global to the addon.
+- Regression coverage includes more than 200 trip connections, more than 500 durable
+  paths, deep route persistence, zero/coarse map zooms, dense-area subdivision,
+  partial loading deadlines, per-task outcomes, interrupted connections, pause/resume,
+  global workload changes, source changes and shared-queue cleanup/fairness.
+- Maximum/Eco geometry budgets and configured worker timeouts are verified. Resource
+  sampling handles unsupported APIs, overlapping reads and bounded history.
+- CPU percentages use one logical core as 100%; memory uses MiB. Native readings
+  refer to the current Obsidian window process, including other plugins. GPU and
+  other application processes are excluded; isolated addon use is not claimed.
+- Individual working graph/time budgets remain explicit. Coarse regional attempts
+  and missing source data are kept separate from a failed detailed walking search.
+- Personal benchmark samples, hardware information, vault notes and cached trip
+  geometry are not included in the published plugin or repository.
+
+---
+
 # Validation — Maps Directions 0.5.0
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 27 October 2026.

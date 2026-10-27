@@ -76,6 +76,8 @@ export class MapsAdapter {
 
   refreshViews(): void { for (const binding of this.views) this.update(binding); }
 
+  workloadChanged(): void { for (const binding of this.views) if (binding.active) binding.overlay.workloadChanged?.(); }
+
   retryRoadRoutes(): void {
     for (const binding of this.views) {
       const host = binding.view.map?.getContainer?.();

@@ -88,3 +88,22 @@ test('oversized and malformed road geometry cannot exceed the memory budget', ()
   assert.equal(memory.merge(snapshot([invalid])), current);
   assert.equal(new DetailedRoadMemory({ positions: 4 }).merge(snapshot([huge])).state, 'empty');
 });
+
+test('Maximum working memory retains an area larger than the former default budget', () => {
+  const memory = new DetailedRoadMemory({ features: 24000, positions: 200000 });
+  const roads = Array.from({ length: 13000 }, (_, index) => road(139 + index / 100000));
+  const stored = memory.merge(snapshot(roads));
+  assert.equal(stored.features.length, 13000);
+  assert.deepEqual(memory.stats(), { features: 13000, positions: 26000, evicted: false });
+});
+
+test('Eco working memory reports eviction across chunks and clears that state for the next connection', () => {
+  const memory = new DetailedRoadMemory({ features: 6000, positions: 50000 });
+  memory.merge(snapshot(Array.from({ length: 5000 }, (_, index) => road(139 + index / 100000))));
+  const latest = memory.merge(snapshot(Array.from({ length: 1500 }, (_, index) => road(140 + index / 100000))));
+  assert.equal(latest.features.length, 6000);
+  assert.deepEqual(memory.stats(), { features: 6000, positions: 12000, evicted: true });
+  assert.ok(latest.features.some(feature => (feature.geometry!.coordinates as number[][])[0][0] === 140));
+  memory.clear();
+  assert.deepEqual(memory.stats(), { features: 0, positions: 0, evicted: false });
+});

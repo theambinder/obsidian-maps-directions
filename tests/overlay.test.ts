@@ -7,7 +7,9 @@ import type { RoadFeature } from '../src/road-graph';
 import type { FeatureCollection, GeoJSONSourceLike, MapLike, MapsMarker, MapsViewLike } from '../src/contracts';
 import { KEYS } from '../src/settings';
 import { RoadRouteCache } from '../src/route-cache';
-import { normalizeLongitude } from '../src/geometry';
+import { normalizeLongitude, buildDirections } from '../src/geometry';
+import { TripQueue } from '../src/trip-queue';
+import { workloadProfile, type WorkloadProfile } from '../src/workload-settings';
 import { AutoPreparationPolicy, PreparationQueue, autoPreparationKey, AUTO_RETRY_NO_PATH_MS } from '../src/auto-preparation';
 import type { BackgroundMapFactory, BackgroundRoadPreparationOptions, RoadPreparationResult, prepareBackgroundRoads } from '../src/background-roads';
 
@@ -1268,4 +1270,225 @@ test('a queued automatic map respects a no-path cooldown written by the precedin
   assert.equal(preparationControl(second.host).button.hidden, true);
   assert.doesNotMatch(preparationControl(second.host).progress.textContent, /no detailed road/i);
   first.overlay.destroy(); second.overlay.destroy();
+});
+
+
+function smartPreparationSetup(options: { ledger?: TripQueue; cache?: RoadRouteCache; visible?: () => boolean; workload?: () => WorkloadProfile; automatic?: boolean } = {}) {
+  const ledger = options.ledger ?? new TripQueue();
+  const subject = preparationSetup({
+    tripQueue: ledger, visible: options.visible ?? (() => true), autoDelayMs: 5,
+    workload: options.workload ?? (() => workloadProfile({ mode: 'eco', pauseMs: 0 })),
+  }, options.cache ?? new RoadRouteCache());
+  subject.view.markerManager.markers[0].coordinates = [22, 114];
+  subject.view.markerManager.markers[1].coordinates = [22.001, 114.002];
+  subject.settings[KEYS.autoPrepare] = options.automatic ?? false;
+  return { ...subject, ledger };
+}
+function cityMarker(index: number): MapsMarker {
+  return { coordinates: [22 + index / 1000, 114 + index / 500], entry: {
+    file: { path: `city-${index}.md` }, getValue: () => ({ toString: () => String(index) }),
+  } };
+}
+function markerRouteKey(a: MapsMarker, b: MapsMarker): string {
+  const feature = buildDirections([a, b], 'sequence', null).features[0];
+  return JSON.stringify(feature.geometry.coordinates.map(([longitude, latitude]) => [normalizeLongitude(longitude), latitude]));
+}
+const cityRoute: RoadRoute = { coordinates: [[114, 22], [114.001, 22.001], [114.002, 22.001]], distance: 300 };
+function allElementText(element: OverlayTestElement): string {
+  return [element.textContent, ...element.children.map(allElementText)].join(' ');
+}
+
+test('production smart integration migrates every legacy cached connection beyond 200 into the durable trip ledger immediately', () => {
+  const cache = new RoadRouteCache(), subject = smartPreparationSetup({ cache });
+  subject.view.markerManager.markers = Array.from({ length: 226 }, (_, index) => cityMarker(index));
+  const markers = subject.view.markerManager.markers;
+  for (let index = 1; index < markers.length; index++) {
+    const a = markers[index - 1], b = markers[index];
+    cache.set(markerRouteKey(a, b), { distance: 300, coordinates: [[a.coordinates[1], a.coordinates[0]], [b.coordinates[1], b.coordinates[0]]] });
+  }
+  subject.overlay.update();
+  assert.equal(subject.ledger.snapshot().total, 225);
+  assert.equal(subject.ledger.snapshot().ready, 225);
+  assert.equal(mainConnections(subject.map).length, 225);
+  assert.ok(mainConnections(subject.map).every(feature => feature.properties.connectionKind === 'road'));
+  assert.ok(subject.ledger.serialize().tasks.every(task => task.route));
+  assert.equal(subject.client.calls.length, 0);
+  assert.equal(subject.background.calls.length, 0);
+  assert.match(allElementText(subject.host), /Processed 225\/225 connections.*0% remaining/);
+  assertOriginalResources(subject.map);
+  assert.deepEqual(subject.errors, []);
+  subject.overlay.destroy();
+});
+
+test('production queue progress uses processed attempts, passes the global Eco working profile and persists a newly found route', async () => {
+  const subject = smartPreparationSetup();
+  subject.overlay.update();
+  assert.match(allElementText(subject.host), /Processed 0\/1 connections.*100% remaining/);
+  assert.match(allElementText(subject.host), /Eco/);
+  const operation = subject.overlay.prepareRoadRoutes(false, false);
+  assert.equal(preparationControl(subject.host).button.textContent, 'Pause');
+  assert.equal(subject.background.calls.length, 1);
+  const options = subject.background.calls[0].options;
+  assert.equal(options.viewportWidth, 768);
+  assert.equal(options.viewportHeight, 512);
+  assert.equal(options.tileCacheSize, 8);
+  assert.deepEqual(options.roadLimits, { maxFeatures: 6000, maxPositions: 50000 });
+  const snapshot = subject.background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: cityRoute.coordinates }, properties: { class: 'minor' } }]);
+  subject.client.finish(0, [cityRoute]);
+  assert.equal(await snapshot, false);
+  subject.background.finish(0, { completed: 1, total: 1, ready: 1 });
+  await operation;
+  assert.equal(subject.ledger.snapshot().ready, 1);
+  assert.equal(subject.ledger.snapshot().percentRemaining, 0);
+  assert.deepEqual(subject.ledger.serialize().tasks[0].route, cityRoute);
+  assert.match(allElementText(subject.host), /Processed 1\/1 connections.*0% remaining/);
+  assert.deepEqual(subject.cameraMoves, []);
+  assert.deepEqual(subject.errors, []);
+  subject.overlay.destroy();
+});
+
+test('durable trip geometry restores with an empty opportunistic route cache and without another background job', () => {
+  const old = smartPreparationSetup(); old.overlay.update();
+  const key = old.ledger.serialize().tasks[0].key;
+  old.ledger.finish(key, 'ready', undefined, cityRoute);
+  const saved = old.ledger.serialize(); old.overlay.destroy();
+  const fresh = smartPreparationSetup({ ledger: new TripQueue(JSON.parse(JSON.stringify(saved))), cache: new RoadRouteCache() });
+  fresh.overlay.update();
+  assert.equal(mainConnections(fresh.map)[0].properties.connectionKind, 'road');
+  mainConnections(fresh.map)[0].geometry.coordinates.forEach((coordinate, index) => {
+    assert.ok(Math.abs(coordinate[0] - cityRoute.coordinates[index][0]) < 1e-9);
+    assert.equal(coordinate[1], cityRoute.coordinates[index][1]);
+  });
+  assert.equal(fresh.ledger.snapshot().ready, 1);
+  assert.equal(fresh.cache.serialize().routes.length, 0);
+  assert.equal(fresh.client.calls.length, 0);
+  assert.equal(fresh.background.calls.length, 0);
+  assert.deepEqual(fresh.errors, []);
+  fresh.overlay.destroy();
+});
+
+test('Pause preserves completed connections and persists pending tasks as paused; Resume does not reprocess completed geometry', async () => {
+  const cache = new RoadRouteCache(), subject = smartPreparationSetup({ cache });
+  subject.view.markerManager.markers = [cityMarker(0), cityMarker(1), cityMarker(2), cityMarker(3)];
+  cache.set(markerRouteKey(subject.view.markerManager.markers[0], subject.view.markerManager.markers[1]), cityRoute);
+  subject.overlay.update();
+  const operation = subject.overlay.prepareRoadRoutes(false, false);
+  assert.equal(subject.ledger.snapshot().ready, 1);
+  assert.equal(subject.ledger.snapshot().preparing, 1);
+  preparationControl(subject.host).button.click();
+  assert.equal(subject.ledger.snapshot().paused, 2);
+  assert.equal(subject.ledger.snapshot().ready, 1);
+  assert.equal(preparationControl(subject.host).button.textContent, 'Resume');
+  subject.background.finish(0);
+  await operation;
+  const saved = subject.ledger.serialize(); subject.overlay.destroy();
+  const fresh = smartPreparationSetup({ ledger: new TripQueue(saved) });
+  fresh.view.markerManager.markers = [cityMarker(0), cityMarker(1), cityMarker(2), cityMarker(3)];
+  fresh.overlay.update();
+  assert.equal(fresh.ledger.snapshot().ready, 1);
+  assert.equal(fresh.ledger.snapshot().paused, 2);
+  assert.equal(preparationControl(fresh.host).button.textContent, 'Resume');
+  const resumed = fresh.overlay.prepareRoadRoutes(false, false);
+  assert.equal(fresh.ledger.snapshot().ready, 1);
+  assert.equal(fresh.ledger.snapshot().paused, 0);
+  assert.equal(fresh.background.calls.length, 1);
+  assert.equal(mainConnections(fresh.map)[0].properties.connectionKind, 'road');
+  fresh.overlay.destroy(); fresh.background.finish(0); await resumed;
+});
+
+test('automatic smart processing does not repeat completed no-path or unavailable tasks after reopening', async () => {
+  const subject = smartPreparationSetup({ automatic: true }); subject.overlay.update();
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(subject.background.calls.length, 1);
+  const snapshot = subject.background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: cityRoute.coordinates }, properties: { class: 'minor' } }]);
+  subject.client.finish(0, [null]); await snapshot;
+  subject.background.finish(0, { completed: 1, total: 1, ready: 1 });
+  await flushRouting(); await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(subject.ledger.snapshot().noPath, 1);
+  assert.equal(subject.background.calls.length, 1);
+  const saved = subject.ledger.serialize(); subject.overlay.destroy();
+  const fresh = smartPreparationSetup({ ledger: new TripQueue(saved), automatic: true });
+  fresh.overlay.update(); await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(fresh.background.calls.length, 0);
+  assert.match(allElementText(fresh.host), /No path: 1/);
+  const key = fresh.ledger.serialize().tasks[0].key;
+  fresh.ledger.finish(key, 'unavailable', 'Some detailed road data was unavailable.');
+  fresh.overlay.update(); await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(fresh.background.calls.length, 0);
+  assert.match(allElementText(fresh.host), /Data unavailable: 1/);
+  fresh.overlay.destroy();
+});
+
+test('global workload changes interrupt only the active smart task and restart it with the new working profile', async () => {
+  let profile = workloadProfile({ mode: 'eco', pauseMs: 0 });
+  const subject = smartPreparationSetup({ workload: () => profile }); subject.overlay.update();
+  const original = subject.overlay.prepareRoadRoutes(false, false);
+  assert.equal(subject.background.calls[0].options.viewportWidth, 768);
+  profile = workloadProfile({ mode: 'balanced', pauseMs: 0 });
+  subject.overlay.workloadChanged(); subject.background.finish(0); await original;
+  assert.equal(subject.ledger.snapshot().queued, 1);
+  const restarted = subject.overlay.prepareRoadRoutes(false, false);
+  assert.equal(subject.background.calls.length, 2);
+  assert.equal(subject.background.calls[1].options.viewportWidth, 1024);
+  assert.equal(subject.background.calls[1].options.tileCacheSize, 16);
+  assert.deepEqual(subject.background.calls[1].options.roadLimits, { maxFeatures: 12000, maxPositions: 100000 });
+  assert.match(allElementText(subject.host), /Balanced/);
+  subject.overlay.destroy(); subject.background.finish(1); await restarted;
+  assert.deepEqual(subject.errors, []);
+});
+
+
+for (const reason of ['marker edit', 'hidden view', 'source style change'] as const) {
+  test(`production smart queue ${reason} aborts only unfinished work without turning it into a completed failure`, async () => {
+    let visible = true;
+    const subject = smartPreparationSetup({ visible: () => visible, automatic: true });
+    subject.overlay.update(); await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(subject.background.calls.length, 1);
+    const originalKey = subject.ledger.serialize().tasks[0].key;
+    if (reason === 'marker edit') subject.view.markerManager.markers[1].coordinates = [22.002, 114.003];
+    if (reason === 'hidden view') visible = false;
+    if (reason === 'source style change') subject.map.reloadStyle();
+    else subject.overlay.update();
+    assert.equal(subject.background.calls[0].options.signal?.aborted, true);
+    subject.background.finish(0); await flushRouting();
+    assert.equal(subject.ledger.get(originalKey)?.state, 'queued');
+    assert.equal(subject.ledger.snapshot().processed, 0);
+    assert.equal(subject.ledger.snapshot().unavailable, 0);
+    subject.settings[KEYS.autoPrepare] = false; subject.overlay.update(); subject.overlay.destroy();
+    assert.deepEqual(subject.errors, []);
+  });
+}
+
+test('automatic single-task smart queue resumes after a global workload change without needing a new map event', async () => {
+  let profile = workloadProfile({ mode: 'eco', pauseMs: 0 });
+  const subject = smartPreparationSetup({ workload: () => profile, automatic: true });
+  subject.overlay.update(); await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(subject.background.calls.length, 1);
+  profile = workloadProfile({ mode: 'balanced', pauseMs: 0 });
+  subject.overlay.workloadChanged(); subject.background.finish(0);
+  await flushRouting(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(subject.background.calls.length, 2);
+  assert.equal(subject.background.calls[1].options.viewportWidth, 1024);
+  subject.overlay.destroy(); subject.background.finish(1); await flushRouting();
+});
+
+test('a source-style change migrates an already retained positive path into its new durable context without rerouting', () => {
+  const subject = smartPreparationSetup(); subject.overlay.update();
+  const oldKey = subject.ledger.serialize().tasks[0].key;
+  subject.ledger.finish(oldKey, 'ready', undefined, cityRoute); subject.overlay.update();
+  assert.equal(subject.cache.serialize().routes.length, 0);
+  Object.assign(subject.map, { getStyle: () => ({
+    sources: { osm: { type: 'vector', url: 'https://tiles.example/changed-source.json' } },
+    layers: [{ source: 'osm', 'source-layer': 'transportation' }],
+  }) });
+  subject.map.reloadStyle();
+  assert.equal(subject.ledger.snapshot().total, 2);
+  assert.equal(subject.ledger.snapshot().ready, 2);
+  assert.equal(mainConnections(subject.map)[0].properties.connectionKind, 'road');
+  assert.match(allElementText(subject.host), /Processed 1\/1 connections.*0% remaining/);
+  assert.equal(subject.background.calls.length, 0);
+  assert.equal(subject.client.calls.length, 0);
+  assert.equal(subject.cache.serialize().routes.length, 0);
+  assert.deepEqual(subject.errors, []);
+  assertOriginalResources(subject.map); subject.overlay.destroy();
 });

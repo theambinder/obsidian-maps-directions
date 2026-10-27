@@ -4,6 +4,10 @@ import { DirectionsOverlay } from './directions-overlay';
 import { openDirectionsDemo, openLocalRoadsDemo } from './demo';
 import { RoadRouteCache } from './route-cache';
 import { AutoPreparationPolicy, PreparationQueue } from './auto-preparation';
+import { TripQueue } from './trip-queue';
+import { ResourceSampler } from './resource-sampler';
+import { readWorkloadSettings, workloadProfile, type WorkloadSettings } from './workload-settings';
+import { MapsDirectionsSettingTab } from './workload-settings-tab';
 
 export default class MapsDirectionsPlugin extends Plugin {
   private adapter!: MapsAdapter;
@@ -12,6 +16,9 @@ export default class MapsDirectionsPlugin extends Plugin {
   private active = false;
   private routeCache!: RoadRouteCache;
   private automaticPolicy!: AutoPreparationPolicy;
+  private tripQueue!: TripQueue;
+  private workload: WorkloadSettings = readWorkloadSettings(undefined);
+  private readonly resources = new ResourceSampler({ onChange: () => { if (this.active && this.adapter) this.adapter.refreshViews(); } });
   private readonly preparationQueue = new PreparationQueue();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
@@ -22,9 +29,15 @@ export default class MapsDirectionsPlugin extends Plugin {
     try { saved = await this.loadData(); } catch { /* An unreadable cache must not prevent Maps from opening. */ }
     this.routeCache = new RoadRouteCache(saved, () => this.scheduleCacheSave());
     this.automaticPolicy = new AutoPreparationPolicy(saved && typeof saved === 'object' ? (saved as Record<string, unknown>).automaticAttempts : undefined, () => this.scheduleCacheSave());
+    const stored = saved && typeof saved === 'object' ? saved as Record<string, unknown> : {};
+    this.tripQueue = new TripQueue(stored.tripQueue, () => this.scheduleCacheSave());
+    this.workload = readWorkloadSettings(stored.workload);
+    this.addSettingTab(new MapsDirectionsSettingTab(this.app, this, () => this.workload, async value => {
+      this.workload = readWorkloadSettings(value); this.saveCache(); this.adapter.workloadChanged();
+    }));
     this.adapter = new MapsAdapter(
       this.app,
-      view => new DirectionsOverlay(view, error => this.reportOverlayError(error), undefined, this.routeCache, { policy: this.automaticPolicy, queue: this.preparationQueue }),
+      view => new DirectionsOverlay(view, error => this.reportOverlayError(error), undefined, this.routeCache, { policy: this.automaticPolicy, queue: this.preparationQueue, tripQueue: this.tripQueue, workload: () => workloadProfile(this.workload), resources: () => this.resources.snapshot() }),
       status => {
         this.status = status;
         if (status.state === 'incompatible' && !this.reported.has(status.message)) {
@@ -36,8 +49,10 @@ export default class MapsDirectionsPlugin extends Plugin {
     this.register(() => {
       this.active = false;
       this.adapter.stop();
+      void this.resources.stop();
       if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; this.saveCache(); }
     });
+    this.resources.start();
     this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.adapter.refreshViews()));
     this.app.workspace.onLayoutReady(() => { if (this.active) this.adapter.start(); });
 
@@ -79,12 +94,13 @@ export default class MapsDirectionsPlugin extends Plugin {
   }
 
   private scheduleCacheSave(): void {
+    if (!this.active) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => { this.saveTimer = null; this.saveCache(); }, 800);
   }
 
   private saveCache(): void {
-    const data = { ...this.routeCache.serialize(), automaticAttempts: this.automaticPolicy.serialize() };
+    const data = { ...this.routeCache.serialize(), automaticAttempts: this.automaticPolicy.serialize(), tripQueue: this.tripQueue.serialize(), workload: this.workload };
     this.saveQueue = this.saveQueue.catch(() => {}).then(() => this.saveData(data)).catch(error => {
       console.error('Maps Directions: could not save local route cache', error);
     });

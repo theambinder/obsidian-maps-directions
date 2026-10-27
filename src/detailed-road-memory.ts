@@ -3,6 +3,7 @@ import type { RoadFeature } from './road-graph';
 
 export interface RoadMemoryLimits { features: number; positions: number }
 const DEFAULT_LIMITS: RoadMemoryLimits = { features: 12000, positions: 100000 };
+const MAX_LIMITS: RoadMemoryLimits = { features: 24000, positions: 200000 };
 const PROPERTY_KEYS = ['class', 'subclass', 'brunnel', 'layer', 'level', 'access', 'foot', 'indoor'];
 
 /** Keeps bounded detailed geometry already seen by this map; it never loads tiles. */
@@ -10,13 +11,14 @@ export class DetailedRoadMemory {
   private readonly features = new Map<string, { feature: RoadFeature; positions: number }>();
   private sources = '';
   private positions = 0;
+  private evicted = false;
   private snapshot: RoadSnapshot | null = null;
   private readonly limits: RoadMemoryLimits;
 
   constructor(limits: Partial<RoadMemoryLimits> = {}) {
     this.limits = {
-      features: Number.isFinite(limits.features) ? Math.max(1, Math.min(DEFAULT_LIMITS.features, Math.floor(limits.features!))) : DEFAULT_LIMITS.features,
-      positions: Number.isFinite(limits.positions) ? Math.max(2, Math.min(DEFAULT_LIMITS.positions, Math.floor(limits.positions!))) : DEFAULT_LIMITS.positions,
+      features: Number.isFinite(limits.features) ? Math.max(1, Math.min(MAX_LIMITS.features, Math.floor(limits.features!))) : DEFAULT_LIMITS.features,
+      positions: Number.isFinite(limits.positions) ? Math.max(2, Math.min(MAX_LIMITS.positions, Math.floor(limits.positions!))) : DEFAULT_LIMITS.positions,
     };
   }
 
@@ -45,6 +47,7 @@ export class DetailedRoadMemory {
       while (this.features.size > this.limits.features || this.positions > this.limits.positions) {
         const oldest = this.features.entries().next().value as [string, { positions: number }] | undefined;
         if (!oldest) break;
+        this.evicted = true;
         this.positions -= oldest[1].positions;
         this.features.delete(oldest[0]);
       }
@@ -62,9 +65,12 @@ export class DetailedRoadMemory {
     return this.snapshot;
   }
 
+  stats(): { features: number; positions: number; evicted: boolean } { return { features: this.features.size, positions: this.positions, evicted: this.evicted }; }
+
   clear(): void {
     this.features.clear();
     this.positions = 0;
+    this.evicted = false;
     this.sources = '';
     this.snapshot = null;
   }

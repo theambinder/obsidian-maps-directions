@@ -1,4 +1,6 @@
 import type { FeatureCollection } from './contracts';
+import type { TripQueueSnapshot } from './trip-queue';
+import type { ResourceSnapshot } from './resource-sampler';
 
 export interface RoadRouteProgress { routed: number; total: number; missing: number }
 export interface RoadPreparationProgress {
@@ -21,6 +23,10 @@ export function getRoadRouteProgress(data: FeatureCollection): RoadRouteProgress
 
 const ROAD_HELP = 'Prepare road routes loads detailed map areas in the background and saves found walking paths. Internet is needed for areas absent from Maps cache. Dashed lines may remain for disconnected paths, ferry or flight legs.';
 const AUTOMATIC_ROAD_HELP = 'Saved paths appear immediately. Missing walking paths are prepared automatically in the background when the map opens. Internet is needed for areas absent from Maps cache. Dashed lines may remain for disconnected paths, ferry or flight legs.';
+const QUEUE_HELP = 'Progress counts processed connection tasks, including paths not found or unavailable data. It does not mean every route was found. Completed tasks are saved; an interrupted connection may reload its temporary roads after reopening.';
+const RESOURCE_HELP = 'Obsidian window process, includes other plugins; GPU excluded. CPU 100% means one logical core.';
+const measured = (value: number | null | undefined, decimals = 0): string => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(Number(value.toFixed(decimals))) : '—';
+const queueNumber = (value: number): number => Number.isFinite(value) ? Math.max(0, value) : 0;
 const PREPARE_HELP = 'Load detailed map areas in the background and save found walking paths.';
 
 /** A lightweight explanation and entry point for local road routing. */
@@ -32,6 +38,9 @@ export class RouteStatusControl {
   private status: HTMLElement | null = null;
   private help: HTMLElement | null = null;
   private preparation: HTMLElement | null = null;
+  private queueSummary: HTMLElement | null = null;
+  private queueCounts: HTMLElement | null = null;
+  private resources: HTMLElement | null = null;
   private signature = '';
   private action: (() => void) | null = null;
 
@@ -44,6 +53,9 @@ export class RouteStatusControl {
     preparation?: RoadPreparationProgress,
     onCancel?: () => void,
     automatic = false,
+    queueProgress?: TripQueueSnapshot,
+    resources?: ResourceSnapshot,
+    workloadLabel?: string,
   ): void {
     const progress = getRoadRouteProgress(data);
     if (!host || !local || progress.total === 0) {
@@ -55,12 +67,23 @@ export class RouteStatusControl {
       this.create(host);
     }
     const running = preparation?.running === true;
-    this.action = running ? onCancel ?? null : automatic ? null : onPrepare;
-    const showButton = running || !automatic && progress.missing > 0 && onPrepare !== null;
+    const resumable = !!queueProgress && queueProgress.paused > 0 && queueProgress.processed < queueProgress.total && !running;
+    this.action = running ? onCancel ?? null : resumable ? onPrepare : automatic ? null : onPrepare;
+    const showButton = running || resumable && onPrepare !== null || !automatic && progress.missing > 0 && onPrepare !== null;
     const preparationText = running
       ? `Preparing roads: ${preparation!.completed}/${preparation!.total} areas`
-      : preparation?.message ?? '';
-    const signature = JSON.stringify([progress, status, showButton, running, !!this.action, preparationText, automatic]);
+      : preparation?.message ?? (queueProgress?.paused ? `${queueProgress.paused} connections paused. Open details for the reason.` : '');
+    const queueText = queueProgress
+      ? `Processed ${queueNumber(queueProgress.processed)}/${queueNumber(queueProgress.total)} connections — ${measured(Math.min(100, queueNumber(queueProgress.percentRemaining)), 1)}% remaining`
+      : '';
+    const queueCounts = queueProgress
+      ? `Queued: ${queueNumber(queueProgress.queued)} · Preparing: ${queueNumber(queueProgress.preparing)} · Ready: ${queueNumber(queueProgress.ready)} · No path: ${queueNumber(queueProgress.noPath)} · Data unavailable: ${queueNumber(queueProgress.unavailable)} · Paused: ${queueNumber(queueProgress.paused)}`
+      : '';
+    const showResources = !!resources || !!queueProgress && !!workloadLabel;
+    const resourceText = showResources
+      ? `${workloadLabel ? `${workloadLabel} · ` : ''}Window CPU ${measured(resources?.currentCpuPercent, 1)}${measured(resources?.currentCpuPercent, 1) === '—' ? '' : '%'} · Window RAM ${measured(resources?.currentMemoryMb)}${measured(resources?.currentMemoryMb) === '—' ? '' : ' MiB'}`
+      : '';
+    const signature = JSON.stringify([progress, status, showButton, running, resumable, !!this.action, preparationText, automatic, queueText, queueCounts, resourceText]);
     if (signature === this.signature) return;
     this.signature = signature;
     this.count!.textContent = `Road routes: ${progress.routed}/${progress.total}`;
@@ -68,11 +91,20 @@ export class RouteStatusControl {
     // Themes can override the browser's hidden rule for native buttons.
     this.button!.style.display = showButton ? '' : 'none';
     this.button!.disabled = !showButton || this.action === null;
-    this.button!.textContent = running ? 'Cancel' : 'Prepare road routes';
-    this.button!.title = running ? 'Cancel road preparation. Paths already found are kept.' : PREPARE_HELP;
+    this.button!.textContent = running ? queueProgress ? 'Pause' : 'Cancel' : resumable ? 'Resume' : 'Prepare road routes';
+    this.button!.title = running ? queueProgress ? 'Pause preparation. Completed connections and queue progress are saved.' : 'Cancel road preparation. Paths already found are kept.' : resumable ? 'Continue the saved queue with the current workload settings.' : PREPARE_HELP;
     this.preparation!.textContent = preparationText;
     this.preparation!.hidden = preparationText.length === 0;
-    this.help!.textContent = automatic ? AUTOMATIC_ROAD_HELP : ROAD_HELP;
+    this.help!.textContent = `${automatic ? AUTOMATIC_ROAD_HELP : ROAD_HELP}${queueProgress ? ` ${QUEUE_HELP}` : ''}`;
+    this.queueSummary!.textContent = queueText;
+    this.queueSummary!.hidden = !queueProgress;
+    this.queueSummary!.style.display = queueProgress ? '' : 'none';
+    this.queueCounts!.textContent = queueCounts;
+    this.queueCounts!.hidden = !queueProgress;
+    this.queueCounts!.style.display = queueProgress ? '' : 'none';
+    this.resources!.textContent = resourceText;
+    this.resources!.hidden = !showResources;
+    this.resources!.style.display = showResources ? '' : 'none';
     this.status!.textContent = status;
     this.status!.hidden = status.length === 0;
   }
@@ -86,6 +118,9 @@ export class RouteStatusControl {
     this.status = null;
     this.help = null;
     this.preparation = null;
+    this.queueSummary = null;
+    this.queueCounts = null;
+    this.resources = null;
     this.signature = '';
     this.action = null;
   }
@@ -97,7 +132,7 @@ export class RouteStatusControl {
     root.setAttribute('aria-label', 'Road routing status');
     Object.assign(root.style, {
       position: 'absolute', top: '10px', left: '10px', zIndex: '2',
-      maxWidth: 'min(260px, calc(100% - 60px))', boxSizing: 'border-box', padding: '7px 10px',
+      maxWidth: 'min(300px, calc(100% - 60px))', boxSizing: 'border-box', padding: '7px 10px',
       color: 'var(--text-normal, #222)', background: 'var(--background-primary, #fff)',
       border: '1px solid var(--background-modifier-border, #ddd)', borderRadius: '6px',
       boxShadow: '0 1px 4px #0003', fontSize: '12px', lineHeight: '1.4',
@@ -111,7 +146,16 @@ export class RouteStatusControl {
     button.type = 'button';
     Object.assign(button.style, { fontSize: '11px', minHeight: '25px', height: 'auto', padding: '3px 6px', margin: '0' });
     button.addEventListener('click', () => { if (!button.disabled) this.action?.(); });
-    header.append(count, button);
+    const queueSummary = doc.createElement('span');
+    queueSummary.className = 'obsidian-maps-directions-queue-progress';
+    queueSummary.setAttribute('role', 'status');
+    queueSummary.title = 'Processed tasks include unavailable data and paths not found; this is separate from the number of road routes found.';
+    Object.assign(queueSummary.style, { flexBasis: '100%', fontSize: '12px', overflowWrap: 'anywhere' });
+    const resources = doc.createElement('span');
+    resources.className = 'obsidian-maps-directions-resource-status';
+    resources.title = RESOURCE_HELP;
+    Object.assign(resources.style, { flexBasis: '100%', fontSize: '11px', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
+    header.append(count, button, queueSummary, resources);
     const preparation = doc.createElement('div');
     preparation.className = 'obsidian-maps-directions-preparation-progress';
     preparation.setAttribute('role', 'status');
@@ -127,7 +171,10 @@ export class RouteStatusControl {
     const diagnostic = doc.createElement('p');
     diagnostic.className = 'obsidian-maps-directions-routing-detail';
     Object.assign(diagnostic.style, { margin: '7px 0 0', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
-    details.append(summary, help, diagnostic);
+    const queueCounts = doc.createElement('p');
+    queueCounts.className = 'obsidian-maps-directions-queue-counts';
+    Object.assign(queueCounts.style, { margin: '7px 0 0', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
+    details.append(summary, help, diagnostic, queueCounts);
     root.append(header, preparation, details);
     // Native controls and help scrolling must not drag or zoom the map.
     for (const event of ['mousedown', 'pointerdown', 'touchstart', 'wheel', 'click', 'dblclick', 'keydown']) {
@@ -141,5 +188,8 @@ export class RouteStatusControl {
     this.status = diagnostic;
     this.help = help;
     this.preparation = preparation;
+    this.queueSummary = queueSummary;
+    this.queueCounts = queueCounts;
+    this.resources = resources;
   }
 }

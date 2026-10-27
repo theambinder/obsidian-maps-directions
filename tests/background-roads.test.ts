@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildRoadPreparationStyle, prepareBackgroundRoads,
-  type BackgroundRoadMap, type BackgroundRoadMapOptions, type RoadPreparationCenter,
+  type BackgroundRoadMap, type BackgroundRoadMapOptions, type RoadPreparationCenter, type RoadPreparationArea,
 } from '../src/background-roads';
 import type { RoadFeature } from '../src/road-graph';
 
@@ -46,11 +46,13 @@ class FakeMap implements BackgroundRoadMap {
   removed = 0;
   ready = false;
   current: RoadPreparationCenter;
+  currentZoom: number;
+  readonly zooms: number[] = [];
   mode: 'idle' | 'source' | 'silent' = 'idle';
   roads = true;
-  constructor(readonly options: BackgroundRoadMapOptions) { this.current = options.center; }
+  constructor(readonly options: BackgroundRoadMapOptions) { this.current = options.center; this.currentZoom = options.zoom; }
   getStyle(): unknown { return this.options.style; }
-  getZoom(): number { return 14; }
+  getZoom(): number { return this.currentZoom; }
   isStyleLoaded(): boolean { return this.ready; }
   loaded(): boolean { return this.ready; }
   areTilesLoaded(): boolean { return this.ready; }
@@ -59,8 +61,9 @@ class FakeMap implements BackgroundRoadMap {
     return this.roads ? [{ geometry: { type: 'LineString', coordinates: [[x, y], [x + 0.001, y]] }, properties: { class: 'minor' } }] : [];
   }
   jumpTo(options: { center: RoadPreparationCenter; zoom: number }): void {
-    assert.equal(options.zoom, 14);
     this.current = options.center;
+    this.currentZoom = options.zoom;
+    this.zooms.push(options.zoom);
     this.jumps.push(options.center);
     if (this.mode !== 'silent') queueMicrotask(() => {
       this.ready = true;
@@ -174,7 +177,7 @@ test('source-loaded events finish an area without depending on a later idle even
   assert.equal(map.listenerCount(), 0);
 });
 
-test('area timeouts collect partial available detail and empty areas do not invoke routing', async () => {
+test('area timeouts report partial detail and empty areas are reported without pretending a road search succeeded', async () => {
   const { original } = fixture();
   let calls = 0;
   const partial = await prepareBackgroundRoads(original, [[114, 22]], {
@@ -189,7 +192,7 @@ test('area timeouts collect partial available detail and empty areas do not invo
   });
   assert.equal(empty.completed, 1);
   assert.equal(empty.ready, 0);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 test('user cancellation during tile loading removes listeners, host and temporary map', async () => {
@@ -252,16 +255,16 @@ test('factory and snapshot errors release temporary resources and propagate to t
   assert.equal(doc.body.children.length, 0);
 });
 
-test('target validation and the 64-area cap bound preparation work', async () => {
+test('target validation retains every valid caller-selected area without an itinerary-length cutoff', async () => {
   const { original } = fixture();
   let map!: FakeMap;
   const centers = Array.from({ length: 70 }, (_, i): RoadPreparationCenter => [114 + i / 100, 22]);
   const result = await prepareBackgroundRoads(original, [[NaN, 22], [114, 90], ...centers], {
     factory: options => { map = new FakeMap(options); return map; }, onSnapshot: () => {},
   });
-  assert.equal(result.total, 64);
-  assert.equal(result.completed, 64);
-  assert.equal(map.jumps.length, 64);
+  assert.equal(result.total, 70);
+  assert.equal(result.completed, 70);
+  assert.equal(map.jumps.length, 70);
   assert.deepEqual(await prepareBackgroundRoads(original, [], {
     factory: () => { throw new Error('Empty target list must not construct a map.'); }, onSnapshot: () => {},
   }), { completed: 0, total: 0, ready: 0, timedOut: false });
@@ -273,4 +276,100 @@ test('unsupported source styles fail before constructing a map or appending a ho
     factory: () => { throw new Error('Unsupported styles must not construct a map.'); }, onSnapshot: () => {},
   }), /supported vector roads/);
   assert.equal(doc.body.children.length, 0);
+});
+
+
+test('adaptive target zooms and workload viewport limits affect only the temporary map', async () => {
+  const { doc, original } = fixture();
+  let map!: FakeMap;
+  const areas: RoadPreparationArea[] = [];
+  const result = await prepareBackgroundRoads(original, [
+    { center: [114, 22], zoom: 6 }, { center: [114, 22], zoom: 14 }, { center: [114.01, 22], zoom: 16 },
+  ], {
+    factory: options => { map = new FakeMap(options); return map; },
+    viewportWidth: 768, viewportHeight: 512, tileCacheSize: 8,
+    onSnapshot: (snapshot, signal, area) => {
+      assert.equal(signal.aborted, false);
+      assert.equal(snapshot.state, 'ready');
+      assert.ok(area); areas.push(area);
+    },
+  });
+  assert.equal(result.ready, 3);
+  assert.deepEqual(map.zooms, [6, 14, 16]);
+  assert.equal(map.options.zoom, 6);
+  assert.equal(map.options.minZoom, 0);
+  assert.equal(map.options.maxZoom, 16);
+  assert.equal(map.options.maxTileCacheSize, 8);
+  const host = map.options.container as unknown as FakeElement;
+  assert.equal(host.style.width, '768px');
+  assert.equal(host.style.height, '512px');
+  assert.deepEqual(areas.map(area => area.index), [0, 1, 2]);
+  assert.deepEqual(areas.map(area => area.target.zoom), [6, 14, 16]);
+  assert.ok(areas.every(area => !area.waitTimedOut));
+  assert.equal(map.removed, 1);
+  assert.equal(doc.body.children.length, 0);
+});
+
+test('working road limits report limited data explicitly without treating it as a completed no-path search', async () => {
+  const { original } = fixture();
+  const states: string[] = [];
+  const result = await prepareBackgroundRoads(original, [[114, 22]], {
+    factory: options => {
+      const map = new FakeMap(options);
+      map.querySourceFeatures = () => [0, 1].map(i => ({ geometry: { type: 'LineString', coordinates: [[114 + i / 100, 22], [114.001 + i / 100, 22]] }, properties: { class: 'minor' } }));
+      return map;
+    },
+    roadLimits: { maxFeatures: 1, maxPositions: 50 },
+    onSnapshot: snapshot => { states.push(snapshot.state); assert.equal(snapshot.features.length, 0); },
+  });
+  assert.equal(result.completed, 1);
+  assert.equal(result.ready, 0);
+  assert.deepEqual(states, ['limited']);
+});
+
+test('per-area partial waits are identified for coverage diagnostics', async () => {
+  const { original } = fixture();
+  let meta: RoadPreparationArea | undefined;
+  await prepareBackgroundRoads(original, [[114, 22]], {
+    factory: options => { const map = new FakeMap(options); map.ready = true; map.mode = 'silent'; return map; },
+    timeoutMs: 2,
+    onSnapshot: (snapshot, signal, area) => { assert.equal(snapshot.state, 'ready'); meta = area; },
+  });
+  assert.equal(meta?.waitTimedOut, true);
+});
+
+test('a chunk deadline returns its completed prefix so the next chunk can resume without reloading it', async () => {
+  const { original } = fixture();
+  let map!: FakeMap;
+  const targets: RoadPreparationCenter[] = [[114, 22], [115, 22], [116, 22]];
+  const first = await prepareBackgroundRoads(original, targets, {
+    factory: options => { map = new FakeMap(options); return map; },
+    totalTimeoutMs: 20,
+    onSnapshot: () => { map.mode = 'silent'; },
+  });
+  assert.deepEqual(first, { completed: 1, total: 3, ready: 1, timedOut: true });
+  const resumed: RoadPreparationCenter[] = [];
+  const second = await prepareBackgroundRoads(original, targets.slice(first.completed), {
+    factory: options => new FakeMap(options),
+    onSnapshot: (snapshot, signal, area) => { resumed.push(area!.target.center); },
+  });
+  assert.equal(second.completed, 2);
+  assert.deepEqual(resumed, [[115, 22], [116, 22]]);
+});
+
+
+test('a whole-world overview at zoom zero is processed and retains the cursor before street detail', async () => {
+  const { original } = fixture();
+  let map!: FakeMap;
+  const indexes: number[] = [];
+  const result = await prepareBackgroundRoads(original, [
+    { center: [0, 0], zoom: 0 }, { center: [120, 22], zoom: 14 },
+  ], {
+    factory: options => { map = new FakeMap(options); return map; },
+    onSnapshot: (snapshot, signal, area) => { assert.equal(snapshot.state, 'ready'); indexes.push(area!.index); },
+  });
+  assert.deepEqual(result, { completed: 2, total: 2, ready: 2, timedOut: false });
+  assert.deepEqual(map.zooms, [0, 14]);
+  assert.equal(map.options.minZoom, 0);
+  assert.deepEqual(indexes, [0, 1]);
 });

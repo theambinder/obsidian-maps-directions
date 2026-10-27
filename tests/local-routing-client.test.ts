@@ -208,3 +208,24 @@ test('a worker-reported search error rejects the request and does not resolve pa
     assert.deepEqual(runtime.revoked, [worker.url]);
   } finally { client.cancel(); runtime.restore(); }
 });
+
+test('configured worker timeouts honor processing modes and keep invalid values from changing the budget', async () => {
+  const runtime = mockRuntime();
+  const client = new LocalRoutingClient();
+  const originalSetTimeout = globalThis.setTimeout;
+  const scheduled: number[] = [];
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    scheduled.push(args[1] ?? 0);
+    return originalSetTimeout(...args);
+  }) as typeof setTimeout;
+  try {
+    for (const timeout of [NaN, 20000, Infinity, 1, 100000]) {
+      client.configure(timeout);
+      const pending = client.route(snapshot, legs);
+      const worker = runtime.workers[0];
+      worker.reply(result(worker.messages.at(-1)!.id));
+      await pending;
+    }
+    assert.deepEqual(scheduled, [8000, 20000, 20000, 1000, 60000]);
+  } finally { client.cancel(); globalThis.setTimeout = originalSetTimeout; runtime.restore(); }
+});

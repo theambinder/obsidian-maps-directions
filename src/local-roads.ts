@@ -5,6 +5,17 @@ export const MIN_ROAD_ZOOM = 14;
 const MAX_FEATURES = 12000;
 const MAX_POSITIONS = 100000;
 
+export interface RoadCollectionOptions {
+  /** Original visible maps require street detail; explicit preparation may inspect coarser roads. */
+  minZoom?: number;
+  maxFeatures?: number;
+  maxPositions?: number;
+}
+
+function budget(value: number | undefined, fallback: number, min: number, max: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, Math.floor(value))) : fallback;
+}
+
 export interface RoadSnapshot {
   key: string;
   features: RoadFeature[];
@@ -13,7 +24,10 @@ export interface RoadSnapshot {
 }
 
 /** Only read the existing map. Never request tiles, move its camera, or alter its style. */
-export function collectLocalRoads(map: Pick<MapLike, 'getStyle' | 'getZoom' | 'querySourceFeatures'>): RoadSnapshot {
+export function collectLocalRoads(map: Pick<MapLike, 'getStyle' | 'getZoom' | 'querySourceFeatures'>, options: RoadCollectionOptions = {}): RoadSnapshot {
+  const minZoom = budget(options.minZoom, MIN_ROAD_ZOOM, 0, 22);
+  const maxFeatures = budget(options.maxFeatures, MAX_FEATURES, 1, 25000);
+  const maxPositions = budget(options.maxPositions, MAX_POSITIONS, 2, 250000);
   const empty = (state: RoadSnapshot['state'], sources: string[] = []): RoadSnapshot =>
     ({ key: state, features: [], sources, state });
   if (!map.getStyle || !map.querySourceFeatures || !map.getZoom) return empty('unsupported');
@@ -22,7 +36,7 @@ export function collectLocalRoads(map: Pick<MapLike, 'getStyle' | 'getZoom' | 'q
     .filter(layer => layer['source-layer'] === 'transportation' && layer.source && style.sources?.[layer.source]?.type === 'vector')
     .map(layer => layer.source!))].sort();
   if (!sources.length) return empty('unsupported');
-  if (map.getZoom() < MIN_ROAD_ZOOM) return empty('zoom', sources);
+  if (map.getZoom() < minZoom) return empty('zoom', sources);
 
   const features: RoadFeature[] = [];
   const signatures = new Set<string>();
@@ -44,7 +58,7 @@ export function collectLocalRoads(map: Pick<MapLike, 'getStyle' | 'getZoom' | 'q
       if (signatures.has(signature)) continue;
       const count = geometry.type === 'LineString' ? geometry.coordinates.length : geometry.coordinates.reduce((sum: number, line: unknown) => sum + (Array.isArray(line) ? line.length : 0), 0);
       positions += count;
-      if (features.length >= MAX_FEATURES || positions > MAX_POSITIONS) return empty('limited', sources);
+      if (features.length >= maxFeatures || positions > maxPositions) return empty('limited', sources);
       signatures.add(signature);
       features.push(feature);
     }

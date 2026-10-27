@@ -21,7 +21,7 @@ layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.5.0 is a testing prerelease, not an Obsidian directory submission.
+Version 0.6.0 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -31,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.5.0.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.6.0.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -47,9 +47,10 @@ The installation ZIP is `dist/maps-directions-0.5.0.zip`. You can also copy
 7. Adjust line width, opacity and arrow size in the same **Directions** group.
 8. In local mode, saved paths appear immediately and missing paths prepare in
    the background. **Automatically prepare roads** is on by default. Progress
-   and **Cancel** appear while work runs; the visible map stays in place.
-   **Road routes: N/total** shows the result, and the **Routes** legend identifies
-   each group and its line color.
+   and **Pause/Resume** controls show the saved queue state; the visible map
+   stays in place. **Road routes: N/total** counts found paths, while preparation
+   progress separately shows processed connections and the percentage remaining.
+   The **Routes** legend identifies each group and its line color.
 
 Connections are disabled by default for existing views. **Straight line** remains
 the default route mode, including for bases created by version 0.1.0. Settings are
@@ -152,29 +153,84 @@ color of its line, in all three color modes. A blank group is labeled
 **Ungrouped**. The legend scrolls when there are many groups and disappears when
 there are no connections or no grouping property.
 
-In **Follow roads (local)** mode, the top-left **Road routes: N/total** control
-counts individual connections between adjacent stops, rather than route groups.
-For example, one Day 1 group with five stops has four connections. The count
-excludes short dashed access lines between the markers and their road paths.
-Expand **Why dashed lines?** for the local routing status and an explanation.
+In **Follow roads (local)** mode, **Road routes: N/total** counts found paths
+between adjacent stops, rather than route groups. One Day 1 group with five stops
+has four connections. Short access lines between pins and their road paths do
+not add to that count.
 
-With **Automatically prepare roads** enabled, saved paths are drawn first and
-missing connections prepare after the visible view has stayed stable for about
-750 ms. No prepare button is needed. The control shows **Preparing roads: x/y
-areas** and **Cancel** while work runs, then reports the result. The visible map
-does not move, and found paths are saved even when preparation is cancelled.
+Preparation progress is separate: it shows how many connections were processed
+and what percentage remains. **100% processed does not mean every connection
+found a road path.** Result counts distinguish:
 
-Automatic attempts are limited to avoid repeatedly downloading roads for the
-same unresolved connections. A connection that still has no path waits 24 hours
-before another automatic attempt; unavailable data, an incomplete preparation
-(time, area or long-distance limits), or a failed attempt waits 15 minutes. These cooldowns survive reopening the view and restarting Obsidian.
-Cancelling suppresses the current view's automatic attempt until it is reopened
-or its connection input changes. Run **Maps Directions: Retry missing road
-routes** to request another attempt without waiting for a cooldown.
+- **Queued** — this connection has not been processed yet.
+- **Preparing** — its road data is being loaded or searched.
+- **Ready** — a road path was found and saved.
+- **No walking path** — a completed local attempt did not find a path with the
+  available detailed network.
+- **Data unavailable** — the available road detail is insufficient, a source or
+  network request failed, or a long connection needs regional routing data.
+- **Paused** — work is stopped by the user or one working part exceeded its data
+  or computation budget. The reason is shown; this is not counted as a completed
+  route search.
 
-Turn **Directions → Automatically prepare roads** off to use manual preparation.
-The **Prepare road routes** button is available in that mode when paths are
-missing. Internet is needed for areas absent from Maps cache.
+**Pause** preserves the queue. **Resume** continues pending work with the current
+plugin-wide processing settings. It does not silently increase memory or time
+budgets. If the reason is a working-data limit, select a larger processing mode
+before resuming that connection. Other queued connections can still be processed.
+Expand the on-map explanation for detailed state and resource scope.
+
+## Saved preparation queue
+
+With **Automatically prepare roads** enabled, saved paths draw immediately.
+Missing connections enter a durable per-connection queue after the visible view
+has stayed stable briefly. Work runs in the background without moving the user's
+map. Multiple views share one preparation slot, so only one temporary preparation
+map runs at a time.
+
+There is no fixed limit on the number of connections or map areas in the whole
+trip, and no two-minute cut-off for the whole itinerary. The queue processes one
+connection at a time in small chunks, saves outcomes and progresses to the next
+connection. A working-data limit pauses the affected connection with a reason
+instead of marking all unprocessed connections as unavailable. Remaining queued
+connections are not discarded when a chunk ends.
+
+The queue, progress, per-connection reasons and completed route geometry survive
+closing the map and restarting Obsidian. A user-paused task stays paused until
+**Resume**. Temporary road networks are not saved: an interrupted connection
+rebuilds its own small area plan after reopening, while previously completed
+connections keep their saved paths and outcomes.
+
+Changing endpoints creates a new connection. The source configuration is included
+in a hashed task identity, so a different road source can be processed separately.
+Color edits, panning and zooming do not invalidate saved geometry. Explicit retry
+can request another attempt for a completed unresolved connection.
+
+**Directions → Automatically prepare roads** remains a per-view preference.
+Processing mode and pauses are global addon settings, described below. Internet
+is needed for road data absent from Maps cache.
+
+## Global processing settings
+
+Open **Settings → Maps Directions** to choose a processing mode and the pause
+between chunks. **Eco** is the default. These preferences apply across map views;
+they are not added to each map's Directions configuration.
+
+| Mode | Areas per chunk | Default pause | Hidden viewport | Tile cache | Working road lines / coordinates | Worker timeout |
+| --- | ---: | ---: | --- | ---: | --- | ---: |
+| **Eco** | 2 | 1 second | 768 × 512 | 8 | 6,000 / 50,000 | 8 seconds |
+| **Balanced** | 4 | 0.25 seconds | 1024 × 768 | 16 | 12,000 / 100,000 | 12 seconds |
+| **Maximum** | 8 | No pause | 1280 × 768 | 32 | 24,000 / 200,000 | 20 seconds |
+
+All modes use one active preparation job. The custom pause accepts 0–60 seconds;
+changing the mode restores that mode's default pause. Longer pauses reduce
+average activity and make preparation slower. Larger working networks can handle
+more complex areas but consume more memory. These are limits on one working part,
+not limits on the trip length, CPU percentages or a guaranteed number of MiB.
+
+Processing can briefly occupy a CPU core even in Eco mode. Larger modes can
+increase network activity, CPU usage, GPU memory, heat and battery consumption.
+They do not guarantee that a path exists or that drawing-oriented source data
+contains all routing connections.
 
 ## Follow roads locally
 
@@ -186,88 +242,71 @@ independent route groups separately.
 
 The standard OpenFreeMap backgrounds are the intended starting point. Custom
 raster backgrounds contain pictures rather than road geometry, and other vector
-schemas may not expose a compatible road source. Connections without a saved
-road path fall back to direct dashed lines when the source is unsupported.
+schemas may not expose a compatible road source. A connection without saved path
+geometry is displayed as a direct dashed line; its queue state explains whether
+it is pending, paused or already attempted.
 
-A road drawn on a zoomed-out map does not necessarily provide the detailed,
-connected geometry needed for route calculation. Automatic preparation loads
-street detail through one temporary hidden map, using the MapLibre
-runtime already installed with Maps and the current background's transport vector
-sources. The addon copies no marker sources, note data, sprites or icons to that
-map. The visible map's camera, style and markers remain unchanged. No manual
-zooming or panning is required to run preparation.
+A drawn road on a zoomed-out map does not necessarily expose the detailed,
+connected network required for searching. Preparation uses one temporary hidden
+MapLibre map supplied by the installed Maps runtime and the current background's
+transport vector sources. It copies no marker sources, note data, sprites or
+icons. The visible map's camera, style and markers remain unchanged.
 
-The hidden map is reused across the selected areas and removed when preparation
-finishes or is cancelled. Preparation jobs share one queue, so only one hidden
-preparation map runs across the plugin's views at a time. Each active job is
-limited to 64 areas, an eight-second load wait per area and a two-minute overall
-deadline. Its tile cache is limited
-to 32 tiles. At most 200 unresolved connections are considered; nearby urban
-connections are prioritized. Legs longer than 30 km receive endpoint detail
-rather than an entire intercity tile corridor. The result can therefore be
-partial, with an explanation shown in the map control.
+Each connection receives an adaptive overview, corridor and endpoint plan. Long
+connections are not silently reduced to endpoint-only loads by a 30 km rule.
+Their regional overview may still be insufficient for a complete walking path;
+that outcome is shown as **Data unavailable**, with an explanation, rather than
+proof that no route exists. A dense area is subdivided into smaller overlapping
+views up to street detail level 16. If it still exceeds the working budget, the
+connection is paused with a working-data reason.
 
-The addon also reads detailed roads already loaded by the visible Maps view.
-While that view remains open, the bounded temporary road collection accumulates
-geometry from neighboring areas and preparation, allowing paths across those
-areas. Road data and graph construction remain local after tile loading.
+Road geometry and the graph for one connection remain in memory across its small
+chunks. After the connection finishes, that working network is released before
+processing another connection. This reduces peak working memory across a trip
+with many cities. A single difficult long connection can still require more data
+or a dedicated regional routing graph; chunking does not make every long route
+cheap or guarantee a globally shortest path.
 
-Found paths are saved automatically and stay visible when you zoom out, pan,
-change the map style, reopen the view or restart Obsidian. A saved path is reused
-when the ordered pair of endpoint coordinates still matches. Moving a stop,
-changing **Sequence**, or filtering stops can create a different connection that
-needs calculation or preparation. Changing colors or route labels does not
-invalidate a path with the same endpoints. Panning, zooming, changing line colors
-or reloading a style does not by itself start another preparation pass.
+Found paths are saved automatically. Durable trip results do not depend on the
+small opportunistic path cache and are not silently evicted after 500 paths or
+100,000 stored vertices. Saved route geometry and queue metadata grow on disk with
+the processed connections. This is not an on-disk road tile database, and the
+background's own availability offline is still governed by Maps and its cache.
 
 If the nearest road belongs to an isolated fragment, the search can try another
 nearby road within 100 m. Markers keep their original coordinates, and short
-dashed access lines connect them to the chosen road path. This helps around
-parallel streets and disconnected paths, but cannot invent a bridge across water
-or recover road geometry absent from the prepared area. Ferry, flight and distant
-connections may remain straight dashed lines. A necessary detour outside the
-bounded prepared area can also leave a connection unresolved.
+dashed access lines connect them to the chosen road path. Missing road geometry,
+bridges, tunnels and required detours can still prevent a route from being found.
 
-Run **Maps Directions: Open local roads demo** for public example stops
-around Tokyo Station, with a detailed map and local routing already selected.
-It creates `Bases/Maps Directions Local Demo` without overwriting existing files.
-**Maps Directions: Check local routing** also reports how many connections found
-a road path and explains its current status.
+Walking restrictions are a choice in this addon's routing algorithm, not a
+MapLibre restriction. This release does not implement correct driving directions,
+complete one-way and turn restrictions, ferries, public transport timetables,
+traffic or live closures. Road tiles are designed for drawing maps, so complete
+routing for every connection is not guaranteed.
 
-- Road paths use the available local network. They are not guaranteed to be the
-  shortest path in the complete real-world road network.
-- The route geometry is approximate and walking-oriented. It does not provide
-  complete driving restrictions, turn-by-turn navigation, traffic or live closures.
-- Source tiles are designed for drawing maps. Clipped or simplified roads,
-  bridges, tunnels and missing connections can prevent a route from being found.
-- A pair without a usable road path is shown as a **straight dashed line**.
-  Other pairs can still follow roads.
+Run **Maps Directions: Open local roads demo** for public example stops around
+Tokyo Station. It creates `Bases/Maps Directions Local Demo` without overwriting
+existing files. **Maps Directions: Check local routing** reports current status.
 
-Graph construction and path search run in a bundled background worker. Input
-and search limits keep the experimental mode bounded; at most 200 connections
-are searched per update. Connections without a searched or saved road path
-use dashed fallback lines.
+## Resource measurements
 
-The persistent cache stores route geometry only, not a road database or offline
-map areas. It is limited to 500 saved paths, 100,000 total coordinate vertices
-and 10,000 vertices per path. The oldest created or updated entries are removed
-when the limits are reached. Detailed road data and the temporary network remain
-in memory for the active view and are not saved to disk.
+The on-map monitor reports preparation progress and available CPU/private-memory
+measurements. These measurements refer to the **Obsidian window process**,
+including its other plugins and contents. They are not isolated addon usage, and
+exclude the GPU process and other application processes.
 
-Directions adds no routing service, API key or bundled map engine. Automatic
-preparation, manual preparation and explicit retries can make additional tile and
-metadata requests to the current map background's existing vector source
-providers through the temporary map. Ordinary use of the visible map also makes
-its usual background requests. Without internet, preparation depends on the
-background tiles already available in Maps cache. Saved path lines can be reused
-locally, but this does not provide a complete offline map or guarantee a route
-for every connection.
+CPU uses cumulative process time over the sample interval. **100% means one CPU
+core equivalent**; multiple threads can produce values over 100%. Memory values
+are **MiB** (1,048,576 bytes) of private process memory, not a guarantee about total
+physical RAM or the addon's own allocations. Unsupported readings are shown as
+unavailable instead of zero. Sampling is local and is not sent to a server.
 
-Preparing new areas uses network bandwidth, background CPU work and a temporary
-GPU map context, so it can increase memory use and battery consumption. Cached
-paths are shown before that work begins; the shared queue, cooldowns and fixed
-limits reduce repeated work. Disable **Automatically prepare roads** when manual
-control of these background requests is preferable.
+A run can report elapsed time, sample count, current/average/peak CPU, baseline
+and peak private memory, memory change, and processed/result counts. Measurements
+include unrelated activity in the same window, so comparing an idle baseline and
+a processing run is more informative than treating every change as plugin-only
+cost. Brief final samples are excluded from instantaneous peak calculation to
+avoid misleading timing-resolution spikes.
 
 ## Ordering and filters
 
@@ -316,12 +355,14 @@ copied to the temporary map or sent to an additional routing provider. As with
 normal map use, tile requests identify the geographic areas being loaded to the
 background provider.
 
-The bounded local cache in `.obsidian/plugins/maps-directions/data.json` stores
-ordered endpoint coordinates, route geometry and path distance, plus cooldown
-records containing hashed attempt identifiers and times. Attempt records contain
-no raw source URLs or group labels. The cache does not store note names, note
-contents, route group names or a road tile database. Like other vault files, this
-plugin data may be included by your configured vault sync or backup tools.
+Local plugin data in `.obsidian/plugins/maps-directions/data.json` stores ordered
+endpoint coordinates, completed route geometry, area plans, task states, reasons
+and progress, together with global workload settings and legacy cooldown/cache
+records. Source identities are hashed; raw provider URLs, note names, note
+contents and route group labels are not stored in queue records. Saved queue and
+route data grows with the processed connections. Temporary road geometry is not
+persisted. Like other vault files, this plugin data may be included by your
+configured vault sync or backup tools.
 
 ## Development
 
@@ -333,11 +374,14 @@ plugin data may be included by your configured vault sync or backup tools.
 - `src/route-legend.ts` — grouped route labels and rendered line colors.
 - `src/route-status-control.ts` — local routing progress, preparation and cancellation.
 - `src/background-roads.ts` — bounded temporary-map road detail loading and cleanup.
-- `src/road-preparation-targets.ts` — bounded detail-area planning for unresolved connections.
-- `src/detailed-road-memory.ts` — bounded road accumulation for the active view.
+- `src/trip-queue.ts` — durable connection outcomes, progress and adaptive area plans.
+- `src/detailed-road-memory.ts` — bounded working road geometry for a connection.
 - `src/route-cache.ts` — bounded persistent endpoint-to-path geometry cache.
 - `src/directions-overlay.ts` — owned MapLibre layers and cleanup.
 - `src/settings.ts` — the additional Directions settings.
+- `src/workload-settings.ts` — global Eco/Balanced/Maximum work profiles.
+- `src/workload-settings-tab.ts` — global addon processing preferences.
+- `src/resource-sampler.ts` — local process-scoped CPU/private-memory measurements.
 - `src/demo.ts` — generated example data; no personal vault data is included.
 - `tests/` — model, routing, overlay ownership and adapter lifecycle checks.
 

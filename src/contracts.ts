@@ -71,4 +71,5 @@ export interface OverlayLike {
   destroy(): void;
   getRoutingStatus?(): string;
   prepareRoadRoutes?(): Promise<void>;
+  workloadChanged?(): void;
 }
