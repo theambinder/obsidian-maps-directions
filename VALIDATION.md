@@ -1,3 +1,35 @@
+# Validation — Maps Directions 0.5.0
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 27 October 2026.
+
+- All 193 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- The actual working map and legend display four clearly different categorical
+  colors (blue, orange, teal and magenta), replacing the earlier similar hues.
+  Line, arrow, fallback and access colors continue to share the same assignment.
+- Existing cached road paths appeared immediately after loading the addon.
+  Missing connections prepared automatically without pressing a button; the job
+  completed, saved retry cooldowns for unresolved connections and released its
+  temporary map. The original map camera was not changed.
+- A second reload restored cached paths and five recent failed-attempt cooldowns.
+  It scheduled no automatic timer or background job and allocated no hidden map.
+- The themed native UI hides the Prepare button completely in automatic mode.
+  Progress and Cancel remain available during work; disabling automatic mode
+  restores manual preparation. New settings and commands are English.
+- Regression coverage includes debounce, cached-first rendering, current input
+  cancellation, hidden-view suppression, Cancel/resume, manual retry, stable
+  palette assignments during filtering, contrast, and bounded palette history.
+- Shared queue tests cover both positive path reuse and negative cooldown reuse
+  after waiting for another view, with one active temporary map including cleanup.
+- Retry metadata uses bounded hashes and timestamps, without source URLs, group
+  labels or additional note contents. Existing geometry cache data remains readable.
+- New background data can use network, CPU, GPU memory and battery. Preparation
+  remains bounded and walking-oriented; automatic mode does not guarantee routes
+  for disconnected, ferry, flight or unavailable road connections.
+- No personal vault files or cached routes are shipped. Existing base settings,
+  marker appearance and official Maps rendering remain under Maps control.
+
+---
+
 # Validation — Maps Directions 0.4.0
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 27 October 2026.

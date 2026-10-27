@@ -70,4 +70,5 @@ export interface OverlayLike {
   update(): void;
   destroy(): void;
   getRoutingStatus?(): string;
+  prepareRoadRoutes?(): Promise<void>;
 }

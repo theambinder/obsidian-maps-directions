@@ -72,3 +72,30 @@ test('color-specific controls follow the current mode without rebuilding the set
   assert.equal(propertyOption.filter?.('formula.RouteColor'), true);
   assert.equal(propertyOption.filter?.('file.name'), false);
 });
+
+test('automatic road preparation is enabled by default and respects an explicit opt-out', () => {
+  const values: Record<string, unknown> = {};
+  const options: ViewConfigLike = { get: key => values[key], getAsPropertyId: () => null };
+  assert.equal(readOptions(options).autoPrepare, true);
+  values[KEYS.autoPrepare] = false;
+  assert.equal(readOptions(options).autoPrepare, false);
+  values[KEYS.autoPrepare] = true;
+  assert.equal(readOptions(options).autoPrepare, true);
+  values[KEYS.autoPrepare] = 'invalid';
+  assert.equal(readOptions(options).autoPrepare, true);
+});
+
+test('automatic preparation setting stays in Directions and follows the current route mode', () => {
+  let mode: unknown;
+  const [directions] = directionSettings({ get: key => key === KEYS.routeMode ? mode : undefined });
+  assert.ok(directions.type === 'group');
+  const automatic = directions.items.find(option => option.key === KEYS.autoPrepare)!;
+  assert.equal(automatic.type, 'toggle');
+  assert.equal(automatic.displayName, 'Automatically prepare roads');
+  assert.equal('default' in automatic && automatic.default, true);
+  assert.equal(automatic.shouldHide?.(), true);
+  mode = 'local';
+  assert.equal(automatic.shouldHide?.(), false);
+  mode = 'straight';
+  assert.equal(automatic.shouldHide?.(), true);
+});

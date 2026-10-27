@@ -7,6 +7,8 @@ import type { RoadFeature } from '../src/road-graph';
 import type { FeatureCollection, GeoJSONSourceLike, MapLike, MapsMarker, MapsViewLike } from '../src/contracts';
 import { KEYS } from '../src/settings';
 import { RoadRouteCache } from '../src/route-cache';
+import { normalizeLongitude } from '../src/geometry';
+import { AutoPreparationPolicy, PreparationQueue, autoPreparationKey, AUTO_RETRY_NO_PATH_MS } from '../src/auto-preparation';
 import type { BackgroundMapFactory, BackgroundRoadPreparationOptions, RoadPreparationResult, prepareBackgroundRoads } from '../src/background-roads';
 
 class FakeMap implements MapLike {
@@ -425,11 +427,10 @@ class DeferredBackgroundPreparation {
   }
 }
 
-function preparationSetup() {
+function preparationSetup(services: ConstructorParameters<typeof DirectionsOverlay>[4] = {}, cache = new RoadRouteCache()) {
   const background = new DeferredBackgroundPreparation();
   const client = new DeferredRoutingClient();
-  const cache = new RoadRouteCache();
-  const subject = setup(true, client, cache, background.services);
+  const subject = setup(true, client, cache, { ...background.services, ...services });
   const roads = attachRoads(subject.map);
   roads.zoom = 6; // The current overview does not expose detailed road geometry.
   const host = new OverlayTestDocument().createElement('div');
@@ -442,6 +443,7 @@ function preparationSetup() {
     fitBounds: (...args: unknown[]) => cameraMoves.push(args),
   });
   subject.settings[KEYS.routeMode] = 'local';
+  subject.settings[KEYS.autoPrepare] = false;
   return { ...subject, background, client, cache, roads, host, cameraMoves };
 }
 
@@ -968,7 +970,7 @@ test('switching random groups to one color removes unused images and restores on
   settings[KEYS.colorMode] = 'single';
   settings[KEYS.color] = '#2583e8';
   overlay.update();
-  assert.ok(oldImages.every(id => !map.images.has(id)));
+  assert.ok(oldImages.filter(id => !id.endsWith('-2583e8')).every(id => !map.images.has(id)));
   assert.equal(map.images.size, 2); // One Maps image and one Directions image.
   assert.deepEqual(mainConnections(map).map(feature => feature.properties.lineColor), ['#2583e8', '#2583e8']);
   assertMatchingArrowImages(map);
@@ -1019,4 +1021,251 @@ test('editing a color property recolors retained road geometry and arrows withou
   assert.deepEqual(errors, []);
   assertOriginalResources(map);
   overlay.destroy();
+});
+
+
+const shortRoadAB: RoadRoute = { coordinates: [[1, 1], [1.003, 1], [1.005, 1.005]], distance: 100 };
+const shortRoadBC: RoadRoute = { coordinates: [[1.005, 1.005], [1.008, 1.005], [1.01, 1.01]], distance: 110 };
+const shortEndpointKey = JSON.stringify([[1, 1], [normalizeLongitude(1.005), 1.005]]);
+const waitForAutomatic = () => new Promise(resolve => setTimeout(resolve, 35));
+const settleAutomatic = async () => { await flushRouting(); await new Promise(resolve => setImmediate(resolve)); };
+
+function automaticPreparationSetup(services: ConstructorParameters<typeof DirectionsOverlay>[4] = {}, cache?: RoadRouteCache) {
+  const visibility = { visible: true };
+  const subject = preparationSetup({ visible: () => visibility.visible, autoDelayMs: 20, ...services }, cache);
+  delete subject.settings[KEYS.autoPrepare]; // New and existing views default to automatic preparation.
+  subject.view.markerManager.markers[1].coordinates = [1.005, 1.005];
+  return { ...subject, visibility };
+}
+
+test('opening a map shows cached paths immediately and prepares only missing legs after the automatic debounce', async () => {
+  const cache = new RoadRouteCache();
+  cache.set(shortEndpointKey, shortRoadAB);
+  const { overlay, map, view, background, client, host, cameraMoves } = automaticPreparationSetup({}, cache);
+  view.markerManager.markers.push(extraMarker('third.md', 1.01, 2));
+  overlay.update();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['road', 'fallback']);
+  assert.equal(mainConnections(map)[0].geometry.coordinates.length, shortRoadAB.coordinates.length);
+  mainConnections(map)[0].geometry.coordinates.forEach((point, index) => {
+    assert.ok(Math.abs(point[0] - shortRoadAB.coordinates[index][0]) < 1e-9);
+    assert.equal(point[1], shortRoadAB.coordinates[index][1]);
+  });
+  assert.equal(preparationControl(host).count.textContent, 'Road routes: 1/2');
+  assert.equal(preparationControl(host).button.hidden, true);
+  assert.equal(background.calls.length, 0);
+  assert.equal(client.calls.length, 0);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(background.calls.length, 0);
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 1);
+  assert.equal(preparationControl(host).button.textContent, 'Cancel');
+  const snapshot = background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: shortRoadBC.coordinates }, properties: { class: 'minor' } }]);
+  assert.deepEqual(client.calls[0].legs, [{ from: [normalizeLongitude(1.005), 1.005], to: [normalizeLongitude(1.01), 1.01] }]);
+  client.finish(0, [shortRoadBC]);
+  assert.equal(await snapshot, false);
+  background.finish(0);
+  await settleAutomatic();
+  assert.deepEqual(mainConnections(map).map(feature => feature.properties.connectionKind), ['road', 'road']);
+  assert.equal(cache.serialize().routes.length, 2);
+  assert.deepEqual(cameraMoves, []);
+  overlay.destroy();
+});
+
+test('automatic preparation does not run for a view whose connections are all cached', async () => {
+  const cache = new RoadRouteCache();
+  cache.set(shortEndpointKey, shortRoadAB);
+  const { overlay, map, background, client } = automaticPreparationSetup({}, cache);
+  overlay.update();
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 0);
+  assert.equal(client.calls.length, 0);
+  assert.equal(mainConnections(map)[0].properties.connectionKind, 'road');
+  overlay.destroy();
+});
+
+test('camera, color and repeated idle updates neither postpone nor duplicate automatic preparation', async () => {
+  const { overlay, map, settings, background } = automaticPreparationSetup();
+  overlay.update();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  settings[KEYS.color] = '#ef8733';
+  settings[KEYS.width] = 6;
+  for (let index = 0; index < 5; index++) { map.emit('moveend'); map.emit('idle'); overlay.update(); }
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(background.calls.length, 1);
+  for (let index = 0; index < 5; index++) { map.emit('moveend'); map.emit('idle'); overlay.update(); }
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 1);
+  background.finish(0);
+  await settleAutomatic();
+  for (let index = 0; index < 5; index++) map.emit('idle');
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 1);
+  overlay.destroy();
+});
+
+test('completed no-path attempts cool down across reopened views and retry when the policy expires', async () => {
+  let now = 100_000_000;
+  const policy = new AutoPreparationPolicy(undefined, undefined, () => now);
+  const original = automaticPreparationSetup({ policy });
+  original.overlay.update();
+  await waitForAutomatic();
+  original.background.finish(0);
+  await settleAutomatic();
+  assert.equal(policy.serialize().attempts.length, 1);
+  assert.equal(policy.serialize().attempts[0].outcome, 'no-path');
+  original.overlay.destroy();
+  const restored = new AutoPreparationPolicy(policy.serialize(), undefined, () => now);
+  const reopened = automaticPreparationSetup({ policy: restored });
+  reopened.overlay.update();
+  await waitForAutomatic();
+  assert.equal(reopened.background.calls.length, 0);
+  now += AUTO_RETRY_NO_PATH_MS;
+  reopened.map.emit('idle');
+  await waitForAutomatic();
+  assert.equal(reopened.background.calls.length, 1);
+  reopened.background.finish(0);
+  await settleAutomatic();
+  reopened.overlay.destroy();
+});
+
+test('Cancel suppresses automatic retries for the same view but edited endpoints remain eligible', async () => {
+  const policy = new AutoPreparationPolicy();
+  const { overlay, map, host, view, background } = automaticPreparationSetup({ policy });
+  overlay.update();
+  await waitForAutomatic();
+  const signal = background.calls[0].options.signal!;
+  preparationControl(host).button.click();
+  assert.equal(signal.aborted, true);
+  background.finish(0);
+  await settleAutomatic();
+  assert.equal(policy.serialize().attempts.length, 0);
+  for (let index = 0; index < 5; index++) { map.emit('idle'); overlay.update(); }
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 1);
+  view.markerManager.markers[1].coordinates = [1.006, 1.006];
+  overlay.update();
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 2);
+  background.finish(1);
+  await settleAutomatic();
+  overlay.destroy();
+});
+
+test('disable, clearing Sequence, hiding and destroying a map cancel scheduled automatic work', async () => {
+  for (const action of ['disable', 'sequence', 'hide', 'destroy'] as const) {
+    const subject = automaticPreparationSetup();
+    subject.overlay.update();
+    if (action === 'disable') subject.settings[KEYS.enabled] = false;
+    if (action === 'sequence') delete subject.settings[KEYS.sequence];
+    if (action === 'hide') subject.visibility.visible = false;
+    if (action === 'destroy') subject.overlay.destroy();
+    else subject.overlay.update();
+    await waitForAutomatic();
+    assert.equal(subject.background.calls.length, 0, action);
+    subject.overlay.destroy();
+  }
+});
+
+test('shared preparation queue serializes maps and queued cancellation allocates no background map', async () => {
+  const queue = new PreparationQueue();
+  const first = automaticPreparationSetup({ queue });
+  const second = automaticPreparationSetup({ queue });
+  first.overlay.update(); second.overlay.update();
+  await waitForAutomatic();
+  assert.equal(first.background.calls.length, 1);
+  assert.equal(second.background.calls.length, 0);
+  second.visibility.visible = false;
+  second.overlay.update();
+  first.background.finish(0);
+  await settleAutomatic();
+  assert.equal(second.background.calls.length, 0);
+  second.visibility.visible = true;
+  second.overlay.update();
+  await waitForAutomatic();
+  assert.equal(second.background.calls.length, 1);
+  second.background.finish(0);
+  await settleAutomatic();
+  first.overlay.destroy(); second.overlay.destroy();
+});
+
+test('hiding during preparation aborts without recording a failed path and showing the map resumes automatically', async () => {
+  const policy = new AutoPreparationPolicy(), queue = new PreparationQueue();
+  const { overlay, background, visibility } = automaticPreparationSetup({ policy, queue });
+  overlay.update();
+  await waitForAutomatic();
+  visibility.visible = false;
+  overlay.update();
+  assert.equal(background.calls[0].options.signal!.aborted, true);
+  visibility.visible = true;
+  overlay.update();
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 1); // The aborted task still owns the slot until cleanup.
+  background.finish(0);
+  await settleAutomatic();
+  assert.equal(background.calls.length, 2);
+  assert.equal(policy.serialize().attempts.length, 0);
+  background.finish(1);
+  await settleAutomatic();
+  overlay.destroy();
+});
+
+test('explicit retry bypasses an automatic cooldown without changing saved routes', async () => {
+  const policy = new AutoPreparationPolicy();
+  policy.record(autoPreparationKey(shortEndpointKey, 'null'), 'no-path');
+  const { overlay, background } = automaticPreparationSetup({ policy });
+  overlay.update();
+  await waitForAutomatic();
+  assert.equal(background.calls.length, 0);
+  const retry = overlay.prepareRoadRoutes();
+  assert.equal(background.calls.length, 1);
+  background.finish(0);
+  await retry;
+  overlay.destroy();
+});
+
+test('a queued map reuses routes saved by the preceding map without allocating another background loader', async () => {
+  const queue = new PreparationQueue(), cache = new RoadRouteCache(), policy = new AutoPreparationPolicy();
+  const first = automaticPreparationSetup({ queue, policy }, cache);
+  const second = automaticPreparationSetup({ queue, policy }, cache);
+  first.overlay.update(); second.overlay.update();
+  await waitForAutomatic();
+  assert.equal(first.background.calls.length, 1);
+  assert.equal(second.background.calls.length, 0);
+  assert.equal(preparationControl(second.host).button.textContent, 'Cancel');
+  const snapshot = first.background.snapshot(0, [{ geometry: { type: 'LineString', coordinates: shortRoadAB.coordinates }, properties: { class: 'minor' } }]);
+  first.client.finish(0, [shortRoadAB]);
+  assert.equal(await snapshot, false);
+  assert.equal(cache.serialize().routes.length, 1);
+  first.background.finish(0);
+  await settleAutomatic();
+  assert.equal(second.background.calls.length, 0);
+  assert.equal(second.client.calls.length, 0);
+  assert.equal(mainConnections(second.map)[0].properties.connectionKind, 'road');
+  assert.equal(preparationControl(second.host).count.textContent, 'Road routes: 1/1');
+  assert.equal(preparationControl(second.host).button.hidden, true);
+  assert.doesNotMatch(preparationControl(second.host).progress.textContent, /no detailed road/i);
+  assert.equal(policy.serialize().attempts.length, 0);
+  first.overlay.destroy(); second.overlay.destroy();
+});
+
+
+test('a queued automatic map respects a no-path cooldown written by the preceding map', async () => {
+  const queue = new PreparationQueue(), policy = new AutoPreparationPolicy();
+  const first = automaticPreparationSetup({ queue, policy });
+  const second = automaticPreparationSetup({ queue, policy });
+  first.overlay.update(); second.overlay.update();
+  await waitForAutomatic();
+  assert.equal(first.background.calls.length, 1);
+  assert.equal(second.background.calls.length, 0);
+  first.background.finish(0);
+  await settleAutomatic();
+  assert.equal(policy.serialize().attempts.length, 1);
+  assert.equal(policy.serialize().attempts[0].outcome, 'no-path');
+  assert.equal(second.background.calls.length, 0);
+  assert.equal(second.client.calls.length, 0);
+  assert.equal(mainConnections(second.map)[0].properties.connectionKind, 'fallback');
+  assert.equal(preparationControl(second.host).count.textContent, 'Road routes: 0/1');
+  assert.equal(preparationControl(second.host).button.hidden, true);
+  assert.doesNotMatch(preparationControl(second.host).progress.textContent, /no detailed road/i);
+  first.overlay.destroy(); second.overlay.destroy();
 });

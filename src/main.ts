@@ -3,6 +3,7 @@ import { MapsAdapter, type AdapterStatus } from './adapter';
 import { DirectionsOverlay } from './directions-overlay';
 import { openDirectionsDemo, openLocalRoadsDemo } from './demo';
 import { RoadRouteCache } from './route-cache';
+import { AutoPreparationPolicy, PreparationQueue } from './auto-preparation';
 
 export default class MapsDirectionsPlugin extends Plugin {
   private adapter!: MapsAdapter;
@@ -10,6 +11,8 @@ export default class MapsDirectionsPlugin extends Plugin {
   private reported = new Set<string>();
   private active = false;
   private routeCache!: RoadRouteCache;
+  private automaticPolicy!: AutoPreparationPolicy;
+  private readonly preparationQueue = new PreparationQueue();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
 
@@ -18,9 +21,10 @@ export default class MapsDirectionsPlugin extends Plugin {
     let saved: unknown;
     try { saved = await this.loadData(); } catch { /* An unreadable cache must not prevent Maps from opening. */ }
     this.routeCache = new RoadRouteCache(saved, () => this.scheduleCacheSave());
+    this.automaticPolicy = new AutoPreparationPolicy(saved && typeof saved === 'object' ? (saved as Record<string, unknown>).automaticAttempts : undefined, () => this.scheduleCacheSave());
     this.adapter = new MapsAdapter(
       this.app,
-      view => new DirectionsOverlay(view, error => this.reportOverlayError(error), undefined, this.routeCache),
+      view => new DirectionsOverlay(view, error => this.reportOverlayError(error), undefined, this.routeCache, { policy: this.automaticPolicy, queue: this.preparationQueue }),
       status => {
         this.status = status;
         if (status.state === 'incompatible' && !this.reported.has(status.message)) {
@@ -34,6 +38,7 @@ export default class MapsDirectionsPlugin extends Plugin {
       this.adapter.stop();
       if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = null; this.saveCache(); }
     });
+    this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.adapter.refreshViews()));
     this.app.workspace.onLayoutReady(() => { if (this.active) this.adapter.start(); });
 
     this.addCommand({
@@ -62,6 +67,7 @@ export default class MapsDirectionsPlugin extends Plugin {
         });
       },
     });
+    this.addCommand({ id: 'retry-road-routes', name: 'Retry missing road routes', callback: () => this.adapter.retryRoadRoutes() });
     this.addCommand({
       id: 'check-local-routing', name: 'Check local routing',
       callback: () => {
@@ -78,7 +84,7 @@ export default class MapsDirectionsPlugin extends Plugin {
   }
 
   private saveCache(): void {
-    const data = this.routeCache.serialize();
+    const data = { ...this.routeCache.serialize(), automaticAttempts: this.automaticPolicy.serialize() };
     this.saveQueue = this.saveQueue.catch(() => {}).then(() => this.saveData(data)).catch(error => {
       console.error('Maps Directions: could not save local route cache', error);
     });

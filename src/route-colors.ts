@@ -8,6 +8,8 @@ export interface RouteColorOptions {
   sequenceProperty: string | null;
   /** Optional native CSS parser for color syntaxes beyond the built-in subset. */
   normalizeColor?: (value: string) => string | null;
+  /** Keep one allocator per open view so filters cannot recolor existing groups. */
+  palette?: RouteColorPalette;
 }
 
 const NAMED: Record<string, string> = {
@@ -88,6 +90,85 @@ export function randomRouteColor(group: string): string {
   return hsl(hash % 360, (68 + (hash >>> 9) % 16) / 100, (54 + (hash >>> 17) % 10) / 100);
 }
 
+/** The first four families stay distinct even for similar route names or dates. */
+export const ROUTE_COLOR_PALETTE = [
+  '#2583e8', '#ef8733', '#159b80', '#cf4f9b',
+  '#d7ab16', '#9a66dc', '#d64c4c', '#22b5cc',
+  '#7fa128', '#a66a38', '#526c8d', '#ed6d9b',
+  '#0d7991', '#704bb0', '#bc7935', '#3a9562',
+] as const;
+
+/** OKLab distances avoid treating two neighboring RGB shades as different families. */
+function perceptualColor(color: string): [number, number, number] {
+  const linear = [1, 3, 5].map(offset => {
+    const value = Number.parseInt(color.slice(offset, offset + 2), 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  const l = Math.cbrt(0.4122214708 * linear[0] + 0.5363325363 * linear[1] + 0.0514459929 * linear[2]);
+  const m = Math.cbrt(0.2119034982 * linear[0] + 0.6806995451 * linear[1] + 0.1073969566 * linear[2]);
+  const s = Math.cbrt(0.0883024619 * linear[0] + 0.2817188376 * linear[1] + 0.6299787005 * linear[2]);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+}
+const distanceSquared = (a: readonly number[], b: readonly number[]): number =>
+  a.reduce((sum, value, index) => sum + (value - b[index]) ** 2, 0);
+const CANDIDATE_COLORS: readonly string[] = [...new Set<string>([
+  ...ROUTE_COLOR_PALETTE,
+  ...Array.from({ length: 48 }, (_, index) => hsl(index * 137.507764, 0.72, [0.43, 0.56, 0.68][index % 3])),
+])];
+const CANDIDATE_POINTS = new Map(CANDIDATE_COLORS.map(color => [color, perceptualColor(color)]));
+
+/** Categorical colors are chosen jointly, while assignments survive view filtering. */
+export class RouteColorPalette {
+  private readonly assignments = new Map<string, string>();
+  private readonly historyLimit = 256;
+
+  assign(groups: readonly string[]): ReadonlyMap<string, string> {
+    const active = new Set(groups);
+    const unknown = [...active].filter(group => !this.assignments.has(group)).sort();
+    // Retain every currently displayed group; evict only old, hidden history.
+    const limit = Math.max(this.historyLimit, active.size);
+    for (const group of this.assignments.keys()) {
+      if (this.assignments.size + unknown.length <= limit) break;
+      if (!active.has(group)) this.assignments.delete(group);
+    }
+    const used = new Set(this.assignments.values());
+    const visible = new Set([...this.assignments].filter(([group]) => active.has(group)).map(([, color]) => color));
+    for (const group of unknown) {
+      let color: string;
+      if (used.size < 4) color = ROUTE_COLOR_PALETTE.find(candidate => !used.has(candidate))!;
+      else {
+        const points = [...visible].map(perceptualColor);
+        let best = -1;
+        color = '';
+        const candidates = [...CANDIDATE_COLORS,
+          ...Array.from({ length: 64 }, (_, index) => randomRouteColor(`route-palette:${this.assignments.size + index}`))];
+        for (const candidate of candidates) {
+          if (used.has(candidate)) continue;
+          const point = CANDIDATE_POINTS.get(candidate) ?? perceptualColor(candidate);
+          const separation = points.length ? Math.min(...points.map(other => distanceSquared(point, other))) : 0;
+          if (separation > best) { best = separation; color = candidate; }
+        }
+        // Very large legends exhaust categorical colors; keep exact RGB values unique.
+        for (let index = this.assignments.size; !color || used.has(color); index++) color = randomRouteColor(`route-palette:${index}`);
+      }
+      this.assignments.set(group, color);
+      used.add(color);
+      visible.add(color);
+    }
+    // Refresh only recency, never the allocated color.
+    const result = new Map<string, string>();
+    for (const group of active) {
+      const color = this.assignments.get(group)!;
+      this.assignments.delete(group);
+      this.assignments.set(group, color);
+      result.set(group, color);
+    }
+    return result;
+  }
+}
+
 function propertyText(marker: MapsMarker, property: string, trim = true): string | null {
   try {
     const text = marker.entry.getValue(property)?.toString();
@@ -108,6 +189,7 @@ export function colorDirections(data: FeatureCollection, markers: readonly MapsM
   };
   const fallback = parse(options.color) ?? '#7c5cff';
   const colors = new Map<string, string>();
+  const automatic = options.colorMode === 'random' ? (options.palette ?? new RouteColorPalette()).assign(data.features.map(feature => String(feature.properties.route ?? ''))) : null;
   if (options.colorMode === 'property' && options.colorProperty && options.sequenceProperty) {
     const points = markers.flatMap((marker, index) => {
       const [lat, lon] = marker.coordinates;
@@ -131,7 +213,7 @@ export function colorDirections(data: FeatureCollection, markers: readonly MapsM
     type: 'FeatureCollection',
     features: data.features.map(feature => {
       const group = String(feature.properties.route ?? '');
-      const lineColor = options.colorMode === 'random' ? randomRouteColor(group) : options.colorMode === 'property' ? colors.get(group) ?? fallback : fallback;
+      const lineColor = options.colorMode === 'random' ? automatic!.get(group)! : options.colorMode === 'property' ? colors.get(group) ?? fallback : fallback;
       return { ...feature, properties: { ...feature.properties, lineColor } };
     }),
   };

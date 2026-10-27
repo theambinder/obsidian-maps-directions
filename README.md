@@ -2,8 +2,8 @@
 
 Add ordered lines and direction arrows to the **Map** layout supplied by the
 official [Maps plugin](https://github.com/obsidianmd/obsidian-maps) for Obsidian Bases.
-Choose direct connections or experimental walking paths along roads, with one-click
-road preparation, automatic colors per route, or colors from a note property.
+Choose direct connections or experimental walking paths along roads, with automatic
+background preparation, contrasting route colors, or colors from a note property.
 
 This is a companion plugin. Official Maps continues to render every marker,
 icon, marker color, popup and map background. Its existing **Display**, **Markers**
@@ -21,7 +21,7 @@ layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.4.0 is a testing prerelease, not an Obsidian directory submission.
+Version 0.5.0 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -31,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.4.0.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.5.0.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -45,10 +45,11 @@ The installation ZIP is `dist/maps-directions-0.4.0.zip`. You can also copy
 6. Choose **Line color mode**: **Single color**, **Random by route** or **Color property**.
    The matching **Line color** or **Color property** control appears below it.
 7. Adjust line width, opacity and arrow size in the same **Directions** group.
-8. In local mode, click **Prepare road routes** if connections remain dashed.
-   Road detail loads in the background, with progress and a **Cancel** button.
-   The visible map stays in place. **Road routes: N/total** shows the result, and
-   the **Routes** legend identifies each group and its line color.
+8. In local mode, saved paths appear immediately and missing paths prepare in
+   the background. **Automatically prepare roads** is on by default. Progress
+   and **Cancel** appear while work runs; the visible map stays in place.
+   **Road routes: N/total** shows the result, and the **Routes** legend identifies
+   each group and its line color.
 
 Connections are disabled by default for existing views. **Straight line** remains
 the default route mode, including for bases created by version 0.1.0. Settings are
@@ -107,13 +108,22 @@ so existing views keep their selected line color.
 | Line color mode | Behavior | Control shown below it |
 | --- | --- | --- |
 | **Single color** | Every connection uses the same color. | **Line color**, with the existing color choices. |
-| **Random by route** | Each value of **Separate routes by** gets a stable automatically generated color. | No additional color control. |
+| **Random by route** | Route groups receive contrasting colors chosen together from a categorical palette. | No additional color control. |
 | **Color property** | Each route takes its color from the selected note or formula property. | **Color property**, a property selector. |
 
-Automatic colors are derived from the route group value. They stay consistent
-when you zoom, pan, reopen the view, reorder markers or filter other groups.
+Automatic colors are assigned together, rather than generating an independent
+random hue for each group. The allocator favors colors that differ from those
+already assigned, making a few simultaneous routes easier to distinguish. Colors
+stay stable while the view remains open, including when other groups are filtered
+out and back in. The same complete group set receives deterministic colors when
+reopened. Opening an initially filtered subset, or introducing new groups, can
+produce different assignments; use **Color property** when a route must always
+have a specific color.
+
 A blank route value is one group. Without **Separate routes by**, all sequenced
-markers belong to one route and receive one automatic color.
+markers belong to one route and receive one automatic color. There is a practical
+limit to how many colors can be clearly distinguished at once; a large number of
+routes can still require filtering or explicit property colors.
 
 For property colors, select a field such as `RouteColor`. For example:
 
@@ -148,12 +158,23 @@ For example, one Day 1 group with five stops has four connections. The count
 excludes short dashed access lines between the markers and their road paths.
 Expand **Why dashed lines?** for the local routing status and an explanation.
 
-**Prepare road routes** automatically loads detailed road areas in the
-background for unresolved connections. It shows **Preparing roads: x/y areas**
-and a **Cancel** button while running, then reports how many connections follow
-roads. The visible map does not move, and found paths are saved even when
-preparation is cancelled. The prepare button is hidden when every current
-connection has a road path. Internet is needed for areas absent from Maps cache.
+With **Automatically prepare roads** enabled, saved paths are drawn first and
+missing connections prepare after the visible view has stayed stable for about
+750 ms. No prepare button is needed. The control shows **Preparing roads: x/y
+areas** and **Cancel** while work runs, then reports the result. The visible map
+does not move, and found paths are saved even when preparation is cancelled.
+
+Automatic attempts are limited to avoid repeatedly downloading roads for the
+same unresolved connections. A connection that still has no path waits 24 hours
+before another automatic attempt; unavailable data, an incomplete preparation
+(time, area or long-distance limits), or a failed attempt waits 15 minutes. These cooldowns survive reopening the view and restarting Obsidian.
+Cancelling suppresses the current view's automatic attempt until it is reopened
+or its connection input changes. Run **Maps Directions: Retry missing road
+routes** to request another attempt without waiting for a cooldown.
+
+Turn **Directions → Automatically prepare roads** off to use manual preparation.
+The **Prepare road routes** button is available in that mode when paths are
+missing. Internet is needed for areas absent from Maps cache.
 
 ## Follow roads locally
 
@@ -169,16 +190,18 @@ schemas may not expose a compatible road source. Connections without a saved
 road path fall back to direct dashed lines when the source is unsupported.
 
 A road drawn on a zoomed-out map does not necessarily provide the detailed,
-connected geometry needed for route calculation. **Prepare road routes** loads
-street detail automatically through one temporary hidden map, using the MapLibre
+connected geometry needed for route calculation. Automatic preparation loads
+street detail through one temporary hidden map, using the MapLibre
 runtime already installed with Maps and the current background's transport vector
 sources. The addon copies no marker sources, note data, sprites or icons to that
 map. The visible map's camera, style and markers remain unchanged. No manual
 zooming or panning is required to run preparation.
 
 The hidden map is reused across the selected areas and removed when preparation
-finishes or is cancelled. Each preparation is limited to 64 areas, an eight-second
-load wait per area and a two-minute overall deadline. Its tile cache is limited
+finishes or is cancelled. Preparation jobs share one queue, so only one hidden
+preparation map runs across the plugin's views at a time. Each active job is
+limited to 64 areas, an eight-second load wait per area and a two-minute overall
+deadline. Its tile cache is limited
 to 32 tiles. At most 200 unresolved connections are considered; nearby urban
 connections are prioritized. Legs longer than 30 km receive endpoint detail
 rather than an entire intercity tile corridor. The result can therefore be
@@ -194,7 +217,8 @@ change the map style, reopen the view or restart Obsidian. A saved path is reuse
 when the ordered pair of endpoint coordinates still matches. Moving a stop,
 changing **Sequence**, or filtering stops can create a different connection that
 needs calculation or preparation. Changing colors or route labels does not
-invalidate a path with the same endpoints.
+invalidate a path with the same endpoints. Panning, zooming, changing line colors
+or reloading a style does not by itself start another preparation pass.
 
 If the nearest road belongs to an isolated fragment, the search can try another
 nearby road within 100 m. Markers keep their original coordinates, and short
@@ -230,13 +254,20 @@ and 10,000 vertices per path. The oldest created or updated entries are removed
 when the limits are reached. Detailed road data and the temporary network remain
 in memory for the active view and are not saved to disk.
 
-Directions adds no routing service, API key or bundled map engine. Clicking
-**Prepare road routes** can make additional tile and metadata requests to the
-current map background's existing vector source providers through the temporary
-map. Ordinary use of the visible map also makes its usual background requests.
-Without internet, preparation depends on the background tiles already available
-in Maps cache. Saved path lines can be reused locally, but this does not provide
-a complete offline map or guarantee a route for every connection.
+Directions adds no routing service, API key or bundled map engine. Automatic
+preparation, manual preparation and explicit retries can make additional tile and
+metadata requests to the current map background's existing vector source
+providers through the temporary map. Ordinary use of the visible map also makes
+its usual background requests. Without internet, preparation depends on the
+background tiles already available in Maps cache. Saved path lines can be reused
+locally, but this does not provide a complete offline map or guarantee a route
+for every connection.
+
+Preparing new areas uses network bandwidth, background CPU work and a temporary
+GPU map context, so it can increase memory use and battery consumption. Cached
+paths are shown before that work begins; the shared queue, cooldowns and fixed
+limits reduce repeated work. Disable **Automatically prepare roads** when manual
+control of these background requests is preferable.
 
 ## Ordering and filters
 
@@ -277,18 +308,20 @@ Directions processes marker data and searches the road network locally. It has
 no telemetry, external routing provider, server or new API key. The official
 Maps plugin continues to make its configured background requests.
 
-**Prepare road routes** makes additional map tile and metadata requests to the
-current background's vector source providers through a temporary hidden map.
-These requests happen only when preparation is explicitly started. Marker
-sources, note names and note contents are not copied to the temporary map or
-sent to an additional routing provider. As with normal map use, tile requests
-identify the geographic areas being loaded to the background provider.
+When automatic preparation is enabled for a local route view, opening it can
+make additional tile and metadata requests to the current background's vector
+source providers through a temporary hidden map. Manual preparation and retries
+can make the same requests. Marker sources, note names and note contents are not
+copied to the temporary map or sent to an additional routing provider. As with
+normal map use, tile requests identify the geographic areas being loaded to the
+background provider.
 
 The bounded local cache in `.obsidian/plugins/maps-directions/data.json` stores
-ordered endpoint coordinates, route geometry and path distance. It does not
-store note names, note contents, route group names or a road tile database. Like
-other vault files, this plugin data may be included by your configured vault sync
-or backup tools.
+ordered endpoint coordinates, route geometry and path distance, plus cooldown
+records containing hashed attempt identifiers and times. Attempt records contain
+no raw source URLs or group labels. The cache does not store note names, note
+contents, route group names or a road tile database. Like other vault files, this
+plugin data may be included by your configured vault sync or backup tools.
 
 ## Development
 
@@ -296,7 +329,7 @@ or backup tools.
 - `src/adapter.ts` — Maps/Bases capability checks, registration and lifecycle hooks.
 - `src/geometry.ts` — numeric ordering, route grouping and direct line geometry.
 - `src/road-graph.ts` — local road network and path search.
-- `src/route-colors.ts` — stable group colors and property color selection.
+- `src/route-colors.ts` — contrasting group color allocation and property colors.
 - `src/route-legend.ts` — grouped route labels and rendered line colors.
 - `src/route-status-control.ts` — local routing progress, preparation and cancellation.
 - `src/background-roads.ts` — bounded temporary-map road detail loading and cleanup.

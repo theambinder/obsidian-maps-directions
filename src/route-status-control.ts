@@ -20,6 +20,7 @@ export function getRoadRouteProgress(data: FeatureCollection): RoadRouteProgress
 }
 
 const ROAD_HELP = 'Prepare road routes loads detailed map areas in the background and saves found walking paths. Internet is needed for areas absent from Maps cache. Dashed lines may remain for disconnected paths, ferry or flight legs.';
+const AUTOMATIC_ROAD_HELP = 'Saved paths appear immediately. Missing walking paths are prepared automatically in the background when the map opens. Internet is needed for areas absent from Maps cache. Dashed lines may remain for disconnected paths, ferry or flight legs.';
 const PREPARE_HELP = 'Load detailed map areas in the background and save found walking paths.';
 
 /** A lightweight explanation and entry point for local road routing. */
@@ -29,6 +30,7 @@ export class RouteStatusControl {
   private count: HTMLElement | null = null;
   private button: HTMLButtonElement | null = null;
   private status: HTMLElement | null = null;
+  private help: HTMLElement | null = null;
   private preparation: HTMLElement | null = null;
   private signature = '';
   private action: (() => void) | null = null;
@@ -41,6 +43,7 @@ export class RouteStatusControl {
     onPrepare: (() => void) | null,
     preparation?: RoadPreparationProgress,
     onCancel?: () => void,
+    automatic = false,
   ): void {
     const progress = getRoadRouteProgress(data);
     if (!host || !local || progress.total === 0) {
@@ -52,21 +55,24 @@ export class RouteStatusControl {
       this.create(host);
     }
     const running = preparation?.running === true;
-    this.action = running ? onCancel ?? null : onPrepare;
-    const showButton = running || progress.missing > 0 && onPrepare !== null;
+    this.action = running ? onCancel ?? null : automatic ? null : onPrepare;
+    const showButton = running || !automatic && progress.missing > 0 && onPrepare !== null;
     const preparationText = running
       ? `Preparing roads: ${preparation!.completed}/${preparation!.total} areas`
       : preparation?.message ?? '';
-    const signature = JSON.stringify([progress, status, showButton, running, !!this.action, preparationText]);
+    const signature = JSON.stringify([progress, status, showButton, running, !!this.action, preparationText, automatic]);
     if (signature === this.signature) return;
     this.signature = signature;
     this.count!.textContent = `Road routes: ${progress.routed}/${progress.total}`;
     this.button!.hidden = !showButton;
+    // Themes can override the browser's hidden rule for native buttons.
+    this.button!.style.display = showButton ? '' : 'none';
     this.button!.disabled = !showButton || this.action === null;
     this.button!.textContent = running ? 'Cancel' : 'Prepare road routes';
     this.button!.title = running ? 'Cancel road preparation. Paths already found are kept.' : PREPARE_HELP;
     this.preparation!.textContent = preparationText;
     this.preparation!.hidden = preparationText.length === 0;
+    this.help!.textContent = automatic ? AUTOMATIC_ROAD_HELP : ROAD_HELP;
     this.status!.textContent = status;
     this.status!.hidden = status.length === 0;
   }
@@ -78,6 +84,7 @@ export class RouteStatusControl {
     this.count = null;
     this.button = null;
     this.status = null;
+    this.help = null;
     this.preparation = null;
     this.signature = '';
     this.action = null;
@@ -132,6 +139,7 @@ export class RouteStatusControl {
     this.count = count;
     this.button = button;
     this.status = diagnostic;
+    this.help = help;
     this.preparation = preparation;
   }
 }

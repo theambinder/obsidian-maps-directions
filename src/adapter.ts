@@ -74,6 +74,15 @@ export class MapsAdapter {
       .map(binding => binding.overlay.getRoutingStatus?.()).filter((status): status is string => !!status);
   }
 
+  refreshViews(): void { for (const binding of this.views) this.update(binding); }
+
+  retryRoadRoutes(): void {
+    for (const binding of this.views) {
+      const host = binding.view.map?.getContainer?.();
+      if (binding.active && host?.isConnected && host.getBoundingClientRect().width > 0 && host.getBoundingClientRect().height > 0) void binding.overlay.prepareRoadRoutes?.();
+    }
+  }
+
   reconcile(): void {
     if (!this.running) return;
     try {

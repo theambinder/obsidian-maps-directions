@@ -98,13 +98,16 @@ test('prepare button hides without missing legs or preparation capability and st
   const root = container.children[0], button = root.children[0].children[1];
   control.update(element(container), data('road'), true, '', () => clicks++);
   assert.equal(button.hidden, true);
+  assert.equal(button.style.display, 'none');
   assert.equal(button.disabled, true);
   button.click();
   assert.equal(clicks, 0);
   control.update(element(container), data('fallback'), true, '', null);
   assert.equal(button.hidden, true);
+  assert.equal(button.style.display, 'none');
   control.update(element(container), data('fallback'), true, '', () => clicks++);
   assert.equal(button.hidden, false);
+  assert.equal(button.style.display, '');
   button.click();
   assert.equal(clicks, 1);
   control.destroy();
@@ -154,6 +157,7 @@ test('preparation shows area progress and switches the single action to cancella
   control.update(element(container), data('road', 'fallback'), true, 'Preparing.', start, { running: true, completed: 3, total: 10 }, cancel);
   assert.equal(button.textContent, 'Cancel');
   assert.equal(button.hidden, false);
+  assert.equal(button.style.display, '');
   assert.equal(button.disabled, false);
   assert.equal(progress.hidden, false);
   assert.equal(progress.textContent, 'Preparing roads: 3/10 areas');
@@ -164,6 +168,7 @@ test('preparation shows area progress and switches the single action to cancella
   assert.equal(cancels, 1);
   control.update(element(container), data('road'), true, 'Done.', start, { running: false, completed: 10, total: 10, message: 'Prepared. 1/1 connections follow roads.' });
   assert.equal(button.hidden, true);
+  assert.equal(button.style.display, 'none');
   assert.equal(progress.textContent, 'Prepared. 1/1 connections follow roads.');
   assert.equal(details.open, true);
   assert.equal(container.children[0], root);
@@ -178,6 +183,7 @@ test('running preparation keeps cancellation available when all paths have been 
   const button = container.children[0].children[0].children[1];
   assert.equal(button.textContent, 'Cancel');
   assert.equal(button.hidden, false);
+  assert.equal(button.style.display, '');
   assert.equal(button.disabled, true);
   control.update(element(container), data('road'), true, '', null, preparation, () => cancels++);
   assert.equal(button.disabled, false);
@@ -201,6 +207,72 @@ test('completed preparation message is safe text and normal preparation can be r
   assert.equal(root.children[1].textContent, message);
   assert.equal(button.textContent, 'Prepare road routes');
   assert.equal(button.hidden, false);
+  assert.equal(button.style.display, '');
+  button.click();
+  assert.equal(starts, 1);
+});
+
+test('automatic mode shows saved progress immediately without requiring a prepare button', () => {
+  const control = new RouteStatusControl();
+  const container = host();
+  let starts = 0;
+  control.update(element(container), data('road', 'fallback'), true, 'Saved paths restored.', () => starts++, undefined, undefined, true);
+  const root = container.children[0], button = root.children[0].children[1], details = root.children[2];
+  assert.equal(root.children[0].children[0].textContent, 'Road routes: 1/2');
+  assert.equal(button.hidden, true);
+  assert.equal(button.style.display, 'none');
+  assert.equal(button.disabled, true);
+  button.click();
+  assert.equal(starts, 0);
+  assert.match(details.children[1].textContent, /Saved paths appear immediately/);
+  assert.match(details.children[1].textContent, /prepared automatically in the background/);
+  assert.match(details.children[1].textContent, /Internet is needed for areas absent from Maps cache/);
+});
+
+test('automatic mode keeps progress and cancellation while work runs and hides preparation after it ends', () => {
+  const control = new RouteStatusControl();
+  const container = host();
+  let starts = 0, cancels = 0;
+  const start = () => starts++;
+  control.update(element(container), data('road', 'fallback'), true, 'Preparing.', start,
+    { running: true, completed: 3, total: 8 }, () => cancels++, true);
+  const root = container.children[0], button = root.children[0].children[1];
+  assert.equal(button.hidden, false);
+  assert.equal(button.style.display, '');
+  assert.equal(button.textContent, 'Cancel');
+  assert.equal(root.children[1].textContent, 'Preparing roads: 3/8 areas');
+  button.click();
+  assert.equal(cancels, 1);
+  assert.equal(starts, 0);
+  control.update(element(container), data('road', 'fallback'), true, 'Done.', start,
+    { running: false, completed: 8, total: 8, message: 'Prepared. Missing connections remain dashed.' }, undefined, true);
+  assert.equal(button.hidden, true);
+  assert.equal(button.style.display, 'none');
+  assert.equal(button.disabled, true);
+  assert.equal(root.children[1].textContent, 'Prepared. Missing connections remain dashed.');
+  button.click();
+  assert.equal(starts, 0);
+});
+
+test('switching automatic preparation off restores the manual action without rebuilding the control', () => {
+  const control = new RouteStatusControl();
+  const container = host();
+  let starts = 0;
+  const start = () => starts++;
+  control.update(element(container), data('fallback'), true, 'Waiting.', start, undefined, undefined, true);
+  const root = container.children[0], details = root.children[2], button = root.children[0].children[1];
+  details.open = true;
+  control.update(element(container), data('fallback'), true, 'Waiting.', start, undefined, undefined, false);
+  assert.equal(container.children[0], root);
+  assert.equal(details.open, true);
+  assert.equal(button.hidden, false);
+  assert.equal(button.style.display, '');
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Prepare road routes');
+  assert.match(details.children[1].textContent, /^Prepare road routes loads/);
+  button.click();
+  assert.equal(starts, 1);
+  control.update(element(container), data('fallback'), true, 'Waiting.', start, undefined, undefined, true);
   button.click();
   assert.equal(starts, 1);
 });

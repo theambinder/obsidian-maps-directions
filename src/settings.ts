@@ -5,7 +5,7 @@ export const KEYS = {
   enabled: 'directionsEnabled', sequence: 'directionsSequence', group: 'directionsRoute',
   arrows: 'directionsArrows', color: 'directionsColor', width: 'directionsWidth',
   opacity: 'directionsOpacity', arrowSize: 'directionsArrowSize',
-  routeMode: 'directionsRouteMode',
+  routeMode: 'directionsRouteMode', autoPrepare: 'directionsAutoPrepare',
   colorMode: 'directionsColorMode', colorProperty: 'directionsColorProperty',
 } as const;
 
@@ -32,6 +32,7 @@ export interface DirectionOptions {
   opacity: number;
   arrowSize: number;
   routeMode: 'straight' | 'local';
+  autoPrepare: boolean;
 }
 
 export function readOptions(config: ViewConfigLike): DirectionOptions {
@@ -52,6 +53,7 @@ export function readOptions(config: ViewConfigLike): DirectionOptions {
     opacity: number(KEYS.opacity, 0.85, 0.1, 1),
     arrowSize: number(KEYS.arrowSize, 1, 0.5, 2),
     routeMode: config.get(KEYS.routeMode) === 'local' ? 'local' : 'straight',
+    autoPrepare: config.get(KEYS.autoPrepare) !== false,
   };
 }
 
@@ -63,6 +65,7 @@ export function directionSettings(config?: Pick<ViewConfigLike, 'get'>): BasesAl
       { type: 'property', key: KEYS.sequence, displayName: 'Sequence property', placeholder: 'Select a sequence property', filter: p => !p.startsWith('file.') },
       { type: 'property', key: KEYS.group, displayName: 'Separate routes by', placeholder: 'Optional property, e.g. Route', filter: p => !p.startsWith('file.') },
       { type: 'dropdown', key: KEYS.routeMode, displayName: 'Route mode', default: 'straight', options: { straight: 'Straight line', local: 'Follow roads (local)' } },
+      { type: 'toggle', key: KEYS.autoPrepare, displayName: 'Automatically prepare roads', default: true, shouldHide: () => config?.get(KEYS.routeMode) !== 'local' },
       { type: 'toggle', key: KEYS.arrows, displayName: 'Show direction arrows', default: true },
       { type: 'dropdown', key: KEYS.colorMode, displayName: 'Line color mode', default: 'single', options: { single: 'Single color', random: 'Random by route', property: 'Color property' } },
       { type: 'dropdown', key: KEYS.color, displayName: 'Line color', default: '#7c5cff', options: LINE_COLORS, shouldHide: () => selectedColorMode() !== 'single' },
