@@ -27,6 +27,7 @@ const WORLD = 2 * Math.PI * RADIUS;
 // Conservative tolerance: nearby parallel roads must not become a shared road.
 const TOLERANCE_METERS = 0.1;
 const MIN_OVERLAP_METERS = 0.05;
+const MAX_DIRECTION_SINE = Math.sin(Math.PI / 180);
 const compare = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 
 function project(point: Point, referenceLongitude: number): Point {
@@ -45,18 +46,23 @@ function coordinate(segment: Segment, distance: number): Point {
 }
 
 function addOverlap(a: Segment, b: Segment, worldShift = 0): void {
-  // Exact road geometry can have different vertex subdivisions after clipping.
-  if (Math.abs(a.ux * b.uy - a.uy * b.ux) > 1e-6) return;
+  // Stored paths can round tile coordinates and insert short seam vertices.
+  // Compare their position as well as direction: exact bearing equality loses
+  // millimetre-close copies of the same road after a save or a new section pass.
+  if (Math.abs(a.ux * b.uy - a.uy * b.ux) > MAX_DIRECTION_SINE) return;
   const dx = b.p[0] + worldShift - a.p[0], dy = b.p[1] - a.p[1];
   const ex = b.q[0] + worldShift - a.p[0], ey = b.q[1] - a.p[1];
   if (Math.abs(dx * a.uy - dy * a.ux) > TOLERANCE_METERS ||
       Math.abs(ex * a.uy - ey * a.ux) > TOLERANCE_METERS) return;
   const t0 = dx * a.ux + dy * a.uy, t1 = ex * a.ux + ey * a.uy;
-  const start = Math.max(0, Math.min(t0, t1)), end = Math.min(a.length, Math.max(t0, t1));
+  const endpointCut = (distance: number, length: number): number =>
+    distance <= TOLERANCE_METERS ? 0 : length - distance <= TOLERANCE_METERS ? length : distance;
+  const start = endpointCut(Math.max(0, Math.min(t0, t1)), a.length);
+  const end = endpointCut(Math.min(a.length, Math.max(t0, t1)), a.length);
   if (end - start < MIN_OVERLAP_METERS) return;
   const direction = a.ux * b.ux + a.uy * b.uy;
-  const first = Math.max(0, Math.min(b.length, (start - t0) / direction));
-  const last = Math.max(0, Math.min(b.length, (end - t0) / direction));
+  const first = endpointCut(Math.max(0, Math.min(b.length, (start - t0) / direction)), b.length);
+  const last = endpointCut(Math.max(0, Math.min(b.length, (end - t0) / direction)), b.length);
   a.cuts.push(start, end);
   b.cuts.push(first, last);
   a.overlaps.push({ start, end, other: b });

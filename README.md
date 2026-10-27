@@ -21,7 +21,7 @@ layout or bundle a map engine.
 Download the installation ZIP from [GitHub Releases](https://github.com/theambinder/obsidian-maps-directions/releases),
 extract the `maps-directions` folder into your vault's `.obsidian/plugins/`,
 then enable **Maps Directions** in **Settings → Community plugins**.
-Version 0.6.3 is a testing prerelease, not an Obsidian directory submission.
+Version 0.6.4 is a testing prerelease, not an Obsidian directory submission.
 
 To build from source instead:
 
@@ -31,7 +31,7 @@ npm test
 npm run package
 ```
 
-The installation ZIP is `dist/maps-directions-0.6.3.zip`. You can also copy
+The installation ZIP is `dist/maps-directions-0.6.4.zip`. You can also copy
 `dist/main.js` and `dist/manifest.json` into `.obsidian/plugins/maps-directions/`.
 
 ## Use with an existing base
@@ -54,7 +54,7 @@ The installation ZIP is `dist/maps-directions-0.6.3.zip`. You can also copy
    The **Routes** legend identifies each group and its line color.
    The global **Maximum road-routing distance (km)** defaults to 30 km; longer
    connections stay straight and do not load roads for calculation.
-   **Connect pins to roads within (m)** defaults to 250 m. Access from a pin to its
+   **Connect pins to roads within (m)** defaults to 300 m. Access from a pin to its
    chosen road is shown separately as an unverified dashed connector.
 
 Connections are disabled by default for existing views. **Straight line** remains
@@ -196,9 +196,9 @@ budgets. Working-data limits instead switch automatically to smaller road
 sections within the selected mode. Existing known resource-limit pauses from
 older versions are upgraded to that strategy; user pauses and unrecognized
 failures stay paused. Other queued connections can still be processed.
-Open **Details** for loader progress, reasons, result counts, CPU/RAM and saved-data size.
-These technical readings are collapsed by default; the map panel keeps only
-route counts, remaining progress, a short status and **Pause/Resume** controls.
+The collapsed panel shows only processed/remaining connection progress. Expand
+that progress row for found routes, skipped connections, status, **Pause/Resume**,
+loader counts, reasons, CPU/RAM and saved-data size.
 
 ## Saved preparation queue
 
@@ -266,7 +266,7 @@ preserves the distance and pin-access settings.
 This is an explicit per-connection preference, not a hidden cap on the number of
 connections in the trip.
 
-**Connect pins to roads within (m)** defaults to **250** and accepts **0–1000 m**.
+**Connect pins to roads within (m)** defaults to **300** and accepts **0–1000 m**.
 It exposes the previous fixed 100 m allowance for matching original pins to
 nearby allowed roads. Set **0** to require pins to be on the road geometry. The
 pin retains its original coordinates; any access to the chosen road is displayed
@@ -372,7 +372,7 @@ the processed connections. This is not an on-disk road tile database, and the
 background's own availability offline is still governed by Maps and its cache.
 
 If the nearest road belongs to an isolated fragment, the search can try another
-allowed road within **Connect pins to roads within (m)**, which defaults to 250 m.
+allowed road within **Connect pins to roads within (m)**, which defaults to 300 m.
 Markers keep their original coordinates, and unverified dashed access lines
 connect them to the chosen road path. Increasing this allowance can choose the
 wrong road or side and does not verify that the access walk is possible. Missing road geometry,
@@ -392,13 +392,15 @@ existing files. **Maps Directions: Check local routing** reports current status.
 
 When multiple connections follow the same road segment, their strokes are shown
 as parallel lanes so each route color remains visible. Direction arrows follow
-the matching lane. This is a visual offset in screen pixels; saved paths and
+the matching lane. Coordinate rounding and small section seams still match the
+same road when they remain within the conservative 10 cm position tolerance.
+This is a visual offset in screen pixels; saved paths and
 original Maps pins keep their coordinates. Direct fallback and pin-access lines
 keep their existing appearance.
 
 ## Resource measurements
 
-The map panel keeps connection progress visible. Open its collapsed **Details**
+The map panel keeps only connection progress visible. Expand its progress row
 for CPU/private-memory readings, saved-data size and technical preparation progress. CPU and memory readings
 refer to the **Obsidian window process**, including its other plugins and contents. They are not isolated addon usage, and
 exclude the GPU process and other application processes.
@@ -439,7 +441,7 @@ providers. Chromium's shared HTTP cache may retain responses according to their
 cache policy. This is separate from the addon's `data.json` and the temporary
 in-memory tile cache.
 
-**Saved data** appears inside the map panel's collapsed **Details** and in plugin
+**Saved data** appears inside the map panel's expanded progress row and in plugin
 settings. It measures only this addon's file, not the browser cache or total
 application storage. File bytes do not represent physically allocated disk blocks
 or cloud sync history.

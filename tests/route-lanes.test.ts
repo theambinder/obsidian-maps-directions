@@ -132,3 +132,49 @@ test('candidate work stays linear for long polylines with an unrelated distant r
     assert.deepEqual(output.features[1].geometry.coordinates, coordinates);
   }
 });
+
+test('millimetre-rounded tile paths and short seam subdivisions keep one continuous shared lane', () => {
+  const exact: [number, number][] = [
+    [10.1012719348, 20.2013971263],
+    [10.1011839615, 20.2018753341],
+    [10.1010652181, 20.2026961347],
+    [10.1009874143, 20.2035143928],
+  ];
+  const shortSeam: [number, number] = [
+    exact[1][0] * 0.006 + exact[2][0] * 0.994,
+    exact[1][1] * 0.006 + exact[2][1] * 0.994,
+  ];
+  const rounded = [exact[0], exact[1], shortSeam, exact[2], exact[3]].map(point =>
+    point.map(value => Math.round(value * 1e8) / 1e8) as [number, number]).reverse();
+  const input = [road('Day A', exact), road('Day B', rounded)];
+  const before = JSON.stringify(input);
+  const output = lanes(input);
+  assert.equal(output.length, 2, 'rounded endpoints must not create tiny centered gaps in a shared run');
+  assert.deepEqual(output.map(physicalOffset), [2.25, -2.25]);
+  assert.ok(output.every(feature => feature.properties.laneArrow === 1));
+  assert.equal(JSON.stringify(input), before, 'saved road coordinates are immutable');
+  input.forEach((feature, index) => assert.ok(feature.geometry.coordinates.every(point =>
+    output[index].geometry.coordinates.some(candidate => candidate[0] === point[0] && candidate[1] === point[1])),
+    'render splitting retains every original vertex in its ordered run'));
+});
+
+test('three rounded or differently subdivided group paths still receive three distinct continuous lanes', () => {
+  const exact: [number, number][] = [
+    [30.0012345679, 40.0012345678], [30.0011234568, 40.0021234567], [30.0010123457, 40.0030123456],
+  ];
+  const rounded = exact.map(point => point.map(value => Math.round(value * 1e8) / 1e8) as [number, number]);
+  const reverse = [...rounded].reverse();
+  const output = lanes([road('A', exact), road('B', rounded), road('C', reverse)]);
+  assert.equal(output.length, 3);
+  const offsets = output.map(physicalOffset);
+  assert.equal(new Set(offsets).size, 3);
+  assert.deepEqual(offsets.map(value => value || 0), [4.5, 0, -4.5]);
+});
+
+test('small-angle crossing roads are not interpreted as a shared long road', () => {
+  const output = lanes([
+    road('A', [[0, 0], [0.01, 0]]),
+    road('B', [[0, -0.00001], [0.01, 0.00001]]),
+  ]);
+  assert.ok(output.every(feature => feature.properties.lineOffset === 0), 'different road positions still require the conservative positional match');
+});

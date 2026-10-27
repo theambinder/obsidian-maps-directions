@@ -1,3 +1,30 @@
+# Validation — Maps Directions 0.6.4
+
+Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.
+
+- All 402 automated tests pass; strict TypeScript, production build and installation ZIP pass.
+- The closed map panel exposes only processed/remaining progress. Found routes,
+  skipped long connections, current status, actions and resource readings belong
+  to its expandable body. Semantic regressions verify collapsed containment,
+  expansion controls and unchanged eligible-only processing counts.
+- New and invalid pin-access preferences default to 300 m. Explicit saved values,
+  custom distances, processing modes and pauses retain their existing behavior.
+- Shared-road detection tolerates millimetre coordinate rounding and short seam
+  vertices while retaining the 10 cm position limit and a bounded parallel check.
+  Rounded paths from different groups occupy separate visual lanes, including
+  opposite travel and three groups with different vertex subdivisions.
+- Near-identical endpoint cuts avoid centered slivers between shared pieces.
+  Crossings, neighboring streets, repeated passes, world seams and spatial-index
+  performance regressions pass. Frozen-input replay preserves cached geometry.
+- Native verification on the reported visible road shows both route colors
+  separately with their matching arrows. The panel expands to route results and
+  collapses back to processing progress. Original Maps and the working Base keep
+  their data and configuration.
+- Personal trip captures, map coordinates, vault notes and diagnostic artifacts
+  are excluded from source and release files.
+
+---
+
 # Validation — Maps Directions 0.6.3
 
 Validated on macOS, Obsidian 1.14.4, official Maps 0.2.2, 28 October 2026.

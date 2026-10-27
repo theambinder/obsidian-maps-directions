@@ -36,7 +36,7 @@ export class MapsDirectionsSettingTab extends PluginSettingTab {
       });
     new Setting(container)
       .setName('Connect pins to roads within (m)')
-      .setDesc('If a pin is off the road, allow a dashed connection up to this distance (default 250 m; range 0–1000 m). That part is not checked for walkability: a larger value may cross a barrier or select the wrong road. 0 requires the pin to be on a road. Changing this retries unresolved routes when automatic preparation is enabled; saved routes and pauses are kept.')
+      .setDesc('If a pin is off the road, allow a dashed connection up to this distance (default 300 m; range 0–1000 m). That part is not checked for walkability: a larger value may cross a barrier or select the wrong road. 0 requires the pin to be on a road. Changing this retries unresolved routes when automatic preparation is enabled; saved routes and pauses are kept.')
       .addText(text => {
         text.inputEl.type = 'number';
         text.inputEl.min = '0'; text.inputEl.max = '1000'; text.inputEl.step = '1';

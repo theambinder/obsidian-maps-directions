@@ -25,7 +25,7 @@ export interface WorkloadProfile {
   maxAccessMeters: number;
 }
 
-export const DEFAULT_WORKLOAD_SETTINGS: Readonly<WorkloadSettings> = Object.freeze({ mode: 'eco', pauseMs: null, maxDistanceKm: 30, maxAccessMeters: 250 });
+export const DEFAULT_WORKLOAD_SETTINGS: Readonly<WorkloadSettings> = Object.freeze({ mode: 'eco', pauseMs: null, maxDistanceKm: 30, maxAccessMeters: 300 });
 
 const PROFILES: Readonly<Record<WorkloadMode, Readonly<Omit<WorkloadProfile, 'maxDistanceKm' | 'maxAccessMeters'>>>> = Object.freeze({
   eco: Object.freeze({ mode: 'eco', label: 'Eco', pauseMs: 1000, areasPerChunk: 2,
@@ -47,7 +47,7 @@ export function readWorkloadSettings(raw: unknown): WorkloadSettings {
   const access = value.maxAccessMeters;
   return { mode, pauseMs: typeof pause === 'number' && Number.isFinite(pause) ? Math.max(0, Math.min(60000, Math.round(pause))) : null,
     maxDistanceKm: typeof distance === 'number' && Number.isFinite(distance) && distance >= 0 ? distance : 30,
-    maxAccessMeters: typeof access === 'number' && Number.isFinite(access) ? Math.max(0, Math.min(1000, access)) : 250 };
+    maxAccessMeters: typeof access === 'number' && Number.isFinite(access) ? Math.max(0, Math.min(1000, access)) : 300 };
 }
 
 /** These are concrete work limits, not promises about CPU percentage or RAM usage. */

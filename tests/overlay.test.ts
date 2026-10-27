@@ -452,7 +452,15 @@ function preparationSetup(services: ConstructorParameters<typeof DirectionsOverl
 function preparationControl(host: OverlayTestElement) {
   const root = host.children.find(child => child.className === 'obsidian-maps-directions-route-status');
   assert.ok(root, 'Expected the on-map road preparation control.');
-  return { root, button: root.children[0].children[1], count: root.children[0].children[0], progress: root.children[1], work: root.children[2].children[4] };
+  const find = (className: string): OverlayTestElement => {
+    const visit = (node: OverlayTestElement): OverlayTestElement | undefined => node.className === className ? node : node.children.map(visit).find(Boolean);
+    const found = visit(root);
+    assert.ok(found, `Missing preparation control element: ${className}`);
+    return found;
+  };
+  return { root, button: find('obsidian-maps-directions-status-action'), count: find('obsidian-maps-directions-route-count'),
+    progress: find('obsidian-maps-directions-preparation-progress'), work: find('obsidian-maps-directions-work-detail'),
+    diagnostic: find('obsidian-maps-directions-routing-detail') };
 }
 
 test('background road preparation requires the explicit map action and never moves the visible camera', async () => {
@@ -513,7 +521,7 @@ test('preparation without any loaded road areas explains unavailable data instea
   background.finish(0, { ready: 0 });
   await preparation;
   const control = preparationControl(host);
-  const diagnostic = control.root.children[2].children[2].textContent;
+  const diagnostic = control.diagnostic.textContent;
   assert.match(control.work.textContent, /no detailed road|unavailable/i);
   assert.match(diagnostic, /unavailable|no detailed road/i);
   assert.doesNotMatch(diagnostic, /no connected walking path/i);

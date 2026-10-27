@@ -83,7 +83,7 @@ export class RouteStatusControl {
     const showButton = running || resumable && onPrepare !== null || !automatic && manualMissing > 0 && onPrepare !== null;
     const workText = running
       ? preparation!.unit === 'sections' ? preparation!.message ?? `Preparing smaller road sections: ${preparation!.completed}/${preparation!.total}` : `Preparing roads: ${preparation!.completed}/${preparation!.total} areas`
-      : preparation?.message ?? (queueProgress?.paused ? `${queueProgress.paused} connections paused. Open details for the reason.` : '');
+      : preparation?.message ?? (queueProgress?.paused ? `${queueProgress.paused} connections paused. Expand the progress row for the reason.` : '');
     const unresolved = queueProgress ? queueNumber(queueProgress.noPath) + queueNumber(queueProgress.unavailable) : progress.missing;
     const preparationText = running ? 'Preparing roads…'
       : resumable ? `Paused · ${queueNumber(queueProgress!.paused)} connection${queueProgress!.paused === 1 ? '' : 's'}`
@@ -92,7 +92,9 @@ export class RouteStatusControl {
       : preparation ? preparation.total > 0 && preparation.completed >= preparation.total ? unresolved ? `Finished · ${unresolved} unresolved` : 'Finished' : 'Preparation stopped' : '';
     const queueText = queueProgress
       ? `${queueNumber(queueProgress.processed)}/${eligible} processed · ${remaining} left (${measured(Math.min(100, queueNumber(queueProgress.percentRemaining)), 1)}%)`
-      : '';
+      : preparation && preparation.total > 0
+        ? `${Math.min(preparation.total, queueNumber(preparation.completed))}/${queueNumber(preparation.total)} map areas processed`
+        : `${progress.routed}/${progress.total} road routes found`;
     const skipped = queueNumber(queueProgress?.direct ?? 0);
     const skippedText = skipped ? `${skipped} skipped (distance limit)` : '';
     const queueCounts = queueProgress
@@ -117,8 +119,10 @@ export class RouteStatusControl {
     this.preparation!.hidden = preparationText.length === 0;
     writeText(this.help!, `${automatic ? AUTOMATIC_ROAD_HELP : ROAD_HELP}${queueProgress ? ` ${QUEUE_HELP}` : ''}`);
     writeText(this.queueSummary!, queueText);
-    this.queueSummary!.hidden = !queueProgress;
-    this.queueSummary!.style.display = queueProgress ? '' : 'none';
+    this.queueSummary!.title = queueProgress
+      ? 'Progress covers connections within the distance limit only. Skipped long connections are excluded. Processed includes unavailable data and paths not found. Expand for route details.'
+      : preparation && preparation.total > 0 ? 'Background map areas processed. Expand for found road routes and preparation details.'
+      : 'Found road routes; no saved connection-processing counts are available. Expand for details.';
     writeText(this.skipped!, skippedText);
     this.skipped!.hidden = !skipped;
     this.skipped!.style.display = skipped ? '' : 'none';
@@ -170,19 +174,29 @@ export class RouteStatusControl {
       boxShadow: '0 1px 4px #0003', fontSize: '12px', lineHeight: '1.4',
       pointerEvents: 'auto', userSelect: 'text',
     });
+    const details = doc.createElement('details');
+    details.className = 'obsidian-maps-directions-status-details';
+    const summary = doc.createElement('summary');
+    Object.assign(summary.style, { cursor: 'pointer', fontWeight: '600', overflowWrap: 'anywhere' });
+    const body = doc.createElement('div');
+    body.className = 'obsidian-maps-directions-status-body';
+    Object.assign(body.style, { marginTop: '6px', maxHeight: 'min(300px, 50vh)', overflowY: 'auto', overscrollBehavior: 'contain' });
     const header = doc.createElement('div');
+    header.className = 'obsidian-maps-directions-status-header';
     Object.assign(header.style, { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px 10px' });
     const count = doc.createElement('span');
+    count.className = 'obsidian-maps-directions-route-count';
     Object.assign(count.style, { fontWeight: '600', whiteSpace: 'nowrap' });
     const button = doc.createElement('button');
+    button.className = 'obsidian-maps-directions-status-action';
     button.type = 'button';
     Object.assign(button.style, { fontSize: '11px', minHeight: '25px', height: 'auto', padding: '3px 6px', margin: '0' });
     button.addEventListener('click', () => { if (!button.disabled) this.action?.(); });
     const queueSummary = doc.createElement('span');
     queueSummary.className = 'obsidian-maps-directions-queue-progress';
     queueSummary.setAttribute('role', 'status');
-    queueSummary.title = 'Progress covers connections within the distance limit only. Skipped long connections are excluded. Processed tasks include unavailable data and paths not found; paused tasks remain unfinished.';
-    Object.assign(queueSummary.style, { flexBasis: '100%', fontSize: '12px', overflowWrap: 'anywhere' });
+    Object.assign(queueSummary.style, { fontSize: '12px', overflowWrap: 'anywhere' });
+    summary.append(queueSummary);
     const skipped = doc.createElement('span');
     skipped.className = 'obsidian-maps-directions-skipped-status';
     Object.assign(skipped.style, { flexBasis: '100%', fontSize: '11px', color: 'var(--text-muted, #666)' });
@@ -194,17 +208,13 @@ export class RouteStatusControl {
     storage.className = 'obsidian-maps-directions-storage-status';
     storage.title = 'Size of this addon’s saved routes, progress and settings in data.json. Change is since this plugin session started.';
     Object.assign(storage.style, { margin: '7px 0 0', fontSize: '11px', color: 'var(--text-muted, #666)', overflowWrap: 'anywhere' });
-    header.append(count, button, queueSummary, skipped);
+    header.append(count, button, skipped);
     const preparation = doc.createElement('div');
     preparation.className = 'obsidian-maps-directions-preparation-progress';
     preparation.setAttribute('role', 'status');
     Object.assign(preparation.style, { marginTop: '5px', overflowWrap: 'anywhere' });
-    const details = doc.createElement('details');
-    Object.assign(details.style, { marginTop: '5px', maxHeight: 'min(240px, 50vh)', overflowY: 'auto', overscrollBehavior: 'contain' });
-    const summary = doc.createElement('summary');
-    summary.textContent = 'Details';
-    Object.assign(summary.style, { cursor: 'pointer', color: 'var(--text-muted, #666)' });
     const help = doc.createElement('p');
+    help.className = 'obsidian-maps-directions-routing-help';
     help.textContent = ROAD_HELP;
     Object.assign(help.style, { margin: '7px 0 0' });
     const diagnostic = doc.createElement('p');
@@ -216,8 +226,9 @@ export class RouteStatusControl {
     const workProgress = doc.createElement('p');
     workProgress.className = 'obsidian-maps-directions-work-detail';
     Object.assign(workProgress.style, { margin: '7px 0 0', overflowWrap: 'anywhere' });
-    details.append(summary, help, diagnostic, queueCounts, workProgress, resources, storage);
-    root.append(header, preparation, details);
+    body.append(header, preparation, help, diagnostic, queueCounts, workProgress, resources, storage);
+    details.append(summary, body);
+    root.append(details);
     // Native controls and help scrolling must not drag or zoom the map.
     for (const event of ['mousedown', 'pointerdown', 'touchstart', 'wheel', 'click', 'dblclick', 'keydown']) {
       root.addEventListener(event, event => event.stopPropagation());

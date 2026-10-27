@@ -493,7 +493,7 @@ export class DirectionsOverlay implements OverlayLike {
       });
       if (!controller.signal.aborted) {
         const progress = ledger.snapshot(this.smartKeys);
-        this.preparationProgress = { running: false, completed: 0, total: 0, message: progress.paused ? `${progress.paused} connections paused. Open Details for the reason; Resume continues them. Resource-limited connections automatically use smaller sections.` : 'Queue processing finished. Results and progress are saved.' };
+        this.preparationProgress = { running: false, completed: 0, total: 0, message: progress.paused ? `${progress.paused} connections paused. Expand the progress row for the reason; Resume continues them. Resource-limited connections automatically use smaller sections.` : 'Queue processing finished. Results and progress are saved.' };
       }
     } catch {
       if (!controller.signal.aborted) this.preparationProgress = { running: false, completed: 0, total: 0, message: 'Queue interrupted. Completed connections are saved.' };

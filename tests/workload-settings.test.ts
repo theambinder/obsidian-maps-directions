@@ -9,10 +9,10 @@ test('minimal Eco is the safe default and reading preferences does not mutate sa
   assert.deepEqual(workloadProfile(readWorkloadSettings(undefined)), {
     mode: 'eco', label: 'Eco', pauseMs: 1000, areasPerChunk: 2,
     viewportWidth: 768, viewportHeight: 512, tileCacheSize: 8,
-    maxRoadFeatures: 6000, maxRoadPositions: 50000, workerTimeoutMs: 8000, maxDistanceKm: 30, maxAccessMeters: 250,
+    maxRoadFeatures: 6000, maxRoadPositions: 50000, workerTimeoutMs: 8000, maxDistanceKm: 30, maxAccessMeters: 300,
   });
   const value = { mode: 'balanced', pauseMs: 123.9 };
-  assert.deepEqual(readWorkloadSettings(value), { mode: 'balanced', pauseMs: 124, maxDistanceKm: 30, maxAccessMeters: 250 });
+  assert.deepEqual(readWorkloadSettings(value), { mode: 'balanced', pauseMs: 124, maxDistanceKm: 30, maxAccessMeters: 300 });
   assert.equal(value.pauseMs, 123.9);
 });
 
@@ -52,12 +52,12 @@ test('invalid road distance preferences cannot accidentally disable the default 
     assert.equal(readWorkloadSettings({ maxDistanceKm }).maxDistanceKm, 30);
   }
   const saved = { mode: 'eco', pauseMs: null, maxDistanceKm: 12.75 };
-  assert.deepEqual(readWorkloadSettings(saved), { ...saved, maxAccessMeters: 250 });
+  assert.deepEqual(readWorkloadSettings(saved), { ...saved, maxAccessMeters: 300 });
 });
 
-test('pin-to-road access defaults to 250 m and finite preferences stay within the explicit 0–1000 m range', () => {
+test('pin-to-road access defaults to 300 m and finite preferences stay within the explicit 0–1000 m range', () => {
   for (const maxAccessMeters of [undefined, null, NaN, Infinity, -Infinity, '250', '', true]) {
-    assert.equal(readWorkloadSettings({ maxAccessMeters }).maxAccessMeters, 250);
+    assert.equal(readWorkloadSettings({ maxAccessMeters }).maxAccessMeters, 300);
   }
   for (const [maxAccessMeters, expected] of [[-1, 0], [0, 0], [12.5, 12.5], [250, 250], [1000, 1000], [1001, 1000], [999999, 1000]]) {
     const settings = readWorkloadSettings({ mode: 'eco', maxAccessMeters });
